@@ -1,4 +1,4 @@
-mesa (18.3.6-2co1) UNRELEASED; urgency=medium
+mesa (18.3.6-2co1) apertis; urgency=medium
 
   * Build without libelf.
     libelf comes under LGPL-3+/GPL-2+ dual license, of which we have
@@ -6,7 +6,7 @@ mesa (18.3.6-2co1) UNRELEASED; urgency=medium
     mesa with the GPL, so we have to disable linking to libelf.
     See https://phabricator.apertis.org/T6342 for details.
 
- -- Andrej Shadura <andrewsh@debian.org>  Mon, 16 Sep 2019 09:22:45 +0200
+ -- Andrej Shadura <andrewsh@debian.org>  Mon, 16 Sep 2019 13:52:07 +0200
 
 mesa (18.3.6-2) unstable; urgency=medium
 

@@ -79,12 +79,11 @@ else
   endif
 
 	DRI_DRIVERS += r200, r100,
-#	GALLIUM_DRIVERS += r600, r300,
+	GALLIUM_DRIVERS += r600, r300,
 
   # LLVM is required for building r300g, radeonsi and llvmpipe drivers.
   # It's also required for building OpenCL support.
-  # ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
-  ifneq (,) # Apertis: LLVM uses libelf
+  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
 	GALLIUM_DRIVERS += radeonsi, swrast,
 	confflags_GALLIUM += -Dllvm=true
 	confflags_GALLIUM += -Dgallium-opencl=icd
@@ -102,8 +101,7 @@ else
 
   # radv needs LLVM and the Vulkan loader, so only build on the subset of
   # arches where we have LLVM enabled and where the Vulkan loader is built.
-  # ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
-  ifneq (,) # amdvk needs libelf
+  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
 	VULKAN_DRIVERS += amd,
   endif
 
@@ -223,7 +221,7 @@ override_dh_install:
     endif
   endif
 
-	dh_install -a --fail-missing -Nlibd3dadapter9-mesa -Nlibd3dadapter9-mesa-dev -Nmesa-opencl-icd -Nmesa-vulkan-drivers
+	dh_install -a --fail-missing
 
 	# Install bug control and script:
 	set -e; for p in $(allpkg); do \

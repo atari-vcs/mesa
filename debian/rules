@@ -25,6 +25,8 @@ else
   endif
 endif
 
+SKIP_PACKAGES = libd3dadapter9-mesa libd3dadapter9-mesa-dev mesa-opencl-icd
+
 DRI_DRIVERS =
 GALLIUM_DRIVERS =
 VULKAN_DRIVERS =
@@ -83,7 +85,7 @@ else
 
   # LLVM is required for building r300g, radeonsi and llvmpipe drivers.
   # It's also required for building OpenCL support.
-  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
+  ifneq (,$(filter $(DEB_HOST_ARCH), amd64))
 	GALLIUM_DRIVERS += radeonsi, swrast,
 	confflags_GALLIUM += -Dllvm=true
 	confflags_GALLIUM += -Dgallium-opencl=icd
@@ -101,7 +103,7 @@ else
 
   # radv needs LLVM and the Vulkan loader, so only build on the subset of
   # arches where we have LLVM enabled and where the Vulkan loader is built.
-  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
+  ifneq (,$(filter $(DEB_HOST_ARCH), amd64))
 	VULKAN_DRIVERS += amd,
   endif
 
@@ -197,8 +199,17 @@ override_dh_install:
 
 	# Copy the hardlinked *_dri.so correctly.
 	install -m755 -d debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/dri/
-	mv debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/dri/*_dri.so \
-	   debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/dri/
+	install -m755 -d debian/libgl1-mesa-dri-llvm/usr/lib/${DEB_HOST_MULTIARCH}/dri/
+
+	for d in debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/dri/*_dri.so; \
+	do \
+		if [ $$(readelf -d "$$d" | grep "Shared library" | grep -c libelf) = 0 ]; \
+		then \
+			mv $$d debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/dri/ ; \
+		else \
+			mv $$d debian/libgl1-mesa-dri-llvm/usr/lib/${DEB_HOST_MULTIARCH}/dri/ ; \
+		fi; \
+	done
 
   # Remove vulkan headers only where they get installed in tmp
   # We ship those headers via src:vulkan / libvulkan-dev
@@ -221,7 +232,7 @@ override_dh_install:
     endif
   endif
 
-	dh_install -a --fail-missing
+	dh_install -a --fail-missing $(SKIP_PACKAGES:%=-N%)
 
 	# Install bug control and script:
 	set -e; for p in $(allpkg); do \
@@ -236,7 +247,7 @@ override_dh_makeshlibs:
 %:
 	dh $@ --with quilt$(with_libva) \
 		--builddirectory=build/ \
-		--buildsystem=meson
+		--buildsystem=meson $(SKIP_PACKAGES:%=-N%)
 
 # For maintainer use only, generate a tarball:
 gentarball: SOURCE=mesa

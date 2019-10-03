@@ -1,3 +1,16 @@
+mesa (18.3.6-2co2) apertis; urgency=medium
+
+  * Revert the removal of libelf dependency.
+  * Split DRI modules linked against LLVM and libelf out of libgl1-mesa-dri
+    into a separate libgl1-mesa-dri-llvm package.
+  * Don’t build:
+    - libd3dadapter9-mesa
+    - libd3dadapter9-mesa-dev
+    - mesa-opencl-icd.
+  * Only build mesa-vulkan-drivers on amd64.
+
+ -- Andrej Shadura <andrewsh@debian.org>  Thu, 03 Oct 2019 12:17:58 +0200
+
 mesa (18.3.6-2co1) apertis; urgency=medium
 
   * Build without libelf.

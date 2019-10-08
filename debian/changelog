@@ -1,3 +1,9 @@
+mesa (18.3.6-2co3) apertis; urgency=medium
+
+  * Drop the separation of the packages, instead make sure libelf isn’t used.
+
+ -- Andrej Shadura <andrewsh@debian.org>  Tue, 08 Oct 2019 11:52:02 +0200
+
 mesa (18.3.6-2co2) apertis; urgency=medium
 
   * Revert the removal of libelf dependency.

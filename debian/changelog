@@ -1,3 +1,10 @@
+mesa (18.3.6-2+deb10u1) buster; urgency=medium
+
+  * Call shmget() with permission 0600 instead of 0777 (CVE-2019-5068)
+    (Closes: #944298)
+
+ -- Moritz Mühlenhoff <jmm@debian.org>  Wed, 15 Jan 2020 20:28:42 +0100
+
 mesa (18.3.6-2) unstable; urgency=medium
 
   * Cherry-pick c77acc3ceba (meson: remove meson-created megadrivers

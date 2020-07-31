@@ -3,3 +3,4 @@
 # meson fixes
 1-5-meson-remove-duplicate-definition.patch
 fix-hurd-ftbfs.diff
+CVE-2019-5068.patch

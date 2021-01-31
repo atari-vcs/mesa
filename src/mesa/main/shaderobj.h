@@ -203,8 +203,9 @@ _mesa_shader_stage_from_subroutine(GLenum subroutine)
       return MESA_SHADER_TESS_CTRL;
    case GL_TESS_EVALUATION_SUBROUTINE:
       return MESA_SHADER_TESS_EVAL;
+   default:
+      unreachable("not reached");
    }
-   unreachable("not reached");
 }
 
 static inline GLenum
@@ -223,10 +224,9 @@ _mesa_shader_stage_to_subroutine(gl_shader_stage stage)
       return GL_TESS_CONTROL_SUBROUTINE;
    case MESA_SHADER_TESS_EVAL:
       return GL_TESS_EVALUATION_SUBROUTINE;
-   case MESA_SHADER_NONE:
-      break;
+   default:
+      unreachable("not reached");
    }
-   unreachable("not reached");
 }
 
 static inline GLenum
@@ -245,10 +245,9 @@ _mesa_shader_stage_to_subroutine_uniform(gl_shader_stage stage)
       return GL_TESS_CONTROL_SUBROUTINE_UNIFORM;
    case MESA_SHADER_TESS_EVAL:
       return GL_TESS_EVALUATION_SUBROUTINE_UNIFORM;
-   case MESA_SHADER_NONE:
-      break;
+   default:
+      unreachable("not reached");
    }
-   unreachable("not reached");
 }
 
 extern bool

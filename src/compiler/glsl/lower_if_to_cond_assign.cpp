@@ -65,15 +65,19 @@ public:
                                 unsigned max_depth,
                                 unsigned min_branch_cost)
    {
+      this->found_unsupported_op = false;
+      this->found_expensive_op = false;
+      this->found_dynamic_arrayref = false;
+      this->is_then = false;
       this->progress = false;
       this->stage = stage;
+      this->then_cost = 0;
+      this->else_cost = 0;
       this->max_depth = max_depth;
       this->min_branch_cost = min_branch_cost;
       this->depth = 0;
 
-      this->condition_variables =
-            _mesa_set_create(NULL, _mesa_hash_pointer,
-                                    _mesa_key_pointer_equal);
+      this->condition_variables = _mesa_pointer_set_create(NULL);
    }
 
    ~ir_if_to_cond_assign_visitor()

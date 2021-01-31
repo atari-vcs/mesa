@@ -77,11 +77,6 @@ dri_message(int level, const char *f, ...)
 #define GL_LIB_NAME "libGL.so.1"
 #endif
 
-#ifndef DEFAULT_DRIVER_DIR
-/* this is normally defined in Mesa/configs/default with DRI_DRIVER_SEARCH_PATH */
-#define DEFAULT_DRIVER_DIR "/usr/local/lib/dri"
-#endif
-
 /**
  * Try to \c dlopen the named driver.
  *
@@ -90,116 +85,34 @@ dri_message(int level, const char *f, ...)
  * order to find the driver.
  *
  * \param driverName - a name like "i965", "radeon", "nouveau", etc.
+ * \param out_driver_handle - Address to return the resulting dlopen() handle.
  *
  * \returns
- * A handle from \c dlopen, or \c NULL if driver file not found.
+ * The __DRIextension entrypoint table for the driver, or \c NULL if driver
+ * file not found.
  */
-_X_HIDDEN void *
-driOpenDriver(const char *driverName)
+_X_HIDDEN const __DRIextension **
+driOpenDriver(const char *driverName, void **out_driver_handle)
 {
-   void *glhandle, *handle;
-   const char *libPaths, *p, *next;
-   char realDriverName[200];
-   int len;
+   void *glhandle;
 
    /* Attempt to make sure libGL symbols will be visible to the driver */
    glhandle = dlopen(GL_LIB_NAME, RTLD_NOW | RTLD_GLOBAL);
 
-   libPaths = NULL;
-   if (geteuid() == getuid()) {
-      /* don't allow setuid apps to use LIBGL_DRIVERS_PATH */
-      libPaths = getenv("LIBGL_DRIVERS_PATH");
-      if (!libPaths)
-         libPaths = getenv("LIBGL_DRIVERS_DIR");        /* deprecated */
-   }
-   if (libPaths == NULL)
-      libPaths = DEFAULT_DRIVER_DIR;
+   static const char *search_path_vars[] = {
+      "LIBGL_DRIVERS_PATH",
+      "LIBGL_DRIVERS_DIR", /* deprecated */
+      NULL
+   };
 
-   handle = NULL;
-   for (p = libPaths; *p; p = next) {
-      next = strchr(p, ':');
-      if (next == NULL) {
-         len = strlen(p);
-         next = p + len;
-      }
-      else {
-         len = next - p;
-         next++;
-      }
-
-#ifdef GLX_USE_TLS
-      snprintf(realDriverName, sizeof realDriverName,
-               "%.*s/tls/%s_dri.so", len, p, driverName);
-      InfoMessageF("OpenDriver: trying %s\n", realDriverName);
-      handle = dlopen(realDriverName, RTLD_NOW | RTLD_GLOBAL);
-#endif
-
-      if (handle == NULL) {
-         snprintf(realDriverName, sizeof realDriverName,
-                  "%.*s/%s_dri.so", len, p, driverName);
-         InfoMessageF("OpenDriver: trying %s\n", realDriverName);
-         handle = dlopen(realDriverName, RTLD_NOW | RTLD_GLOBAL);
-      }
-
-      if (handle != NULL)
-         break;
-      else
-         InfoMessageF("dlopen %s failed (%s)\n", realDriverName, dlerror());
-   }
-
-   if (!handle)
-      ErrorMessageF("unable to load driver: %s_dri.so\n", driverName);
+   const __DRIextension **extensions =
+      loader_open_driver(driverName, out_driver_handle, search_path_vars);
 
    if (glhandle)
       dlclose(glhandle);
 
-   return handle;
-}
-
-_X_HIDDEN const __DRIextension **
-driGetDriverExtensions(void *handle, const char *driver_name)
-{
-   const __DRIextension **extensions = NULL;
-   const __DRIextension **(*get_extensions)(void);
-   char *get_extensions_name = loader_get_extensions_name(driver_name);
-
-   if (get_extensions_name) {
-      get_extensions = dlsym(handle, get_extensions_name);
-      if (get_extensions) {
-         free(get_extensions_name);
-         return get_extensions();
-      } else {
-         InfoMessageF("driver does not expose %s(): %s\n",
-                      get_extensions_name, dlerror());
-         free(get_extensions_name);
-      }
-   }
-
-   extensions = dlsym(handle, __DRI_DRIVER_EXTENSIONS);
-   if (extensions == NULL) {
-      ErrorMessageF("driver exports no extensions (%s)\n", dlerror());
-      return NULL;
-   }
-
    return extensions;
 }
-
-static GLboolean
-__driGetMSCRate(__DRIdrawable *draw,
-		int32_t * numerator, int32_t * denominator,
-		void *loaderPrivate)
-{
-   __GLXDRIdrawable *glxDraw = loaderPrivate;
-
-   return __glxGetMscRate(glxDraw->psc, numerator, denominator);
-}
-
-_X_HIDDEN const __DRIsystemTimeExtension systemTimeExtension = {
-   .base = {__DRI_SYSTEM_TIME, 1 },
-
-   .getUST              = __glXGetUST,
-   .getMSCRate          = __driGetMSCRate
-};
 
 #define __ATTRIB(attrib, field) \
     { attrib, offsetof(struct glx_config, field) }
@@ -236,6 +149,10 @@ static const struct
       __ATTRIB(__DRI_ATTRIB_GREEN_MASK, greenMask),
       __ATTRIB(__DRI_ATTRIB_BLUE_MASK, blueMask),
       __ATTRIB(__DRI_ATTRIB_ALPHA_MASK, alphaMask),
+      __ATTRIB(__DRI_ATTRIB_RED_SHIFT, redShift),
+      __ATTRIB(__DRI_ATTRIB_GREEN_SHIFT, greenShift),
+      __ATTRIB(__DRI_ATTRIB_BLUE_SHIFT, blueShift),
+      __ATTRIB(__DRI_ATTRIB_ALPHA_SHIFT, alphaShift),
 #endif
       __ATTRIB(__DRI_ATTRIB_MAX_PBUFFER_WIDTH, maxPbufferWidth),
       __ATTRIB(__DRI_ATTRIB_MAX_PBUFFER_HEIGHT, maxPbufferHeight),
@@ -467,7 +384,7 @@ driReleaseDrawables(struct glx_context *gc)
       if (pdraw->drawable == pdraw->xDrawable) {
 	 pdraw->refcount --;
 	 if (pdraw->refcount == 0) {
-	    (*pdraw->destroyDrawable)(pdraw);
+	    pdraw->destroyDrawable(pdraw);
 	    __glxHashDelete(priv->drawHash, gc->currentDrawable);
 	 }
       }
@@ -478,7 +395,7 @@ driReleaseDrawables(struct glx_context *gc)
       if (pdraw->drawable == pdraw->xDrawable) {
 	 pdraw->refcount --;
 	 if (pdraw->refcount == 0) {
-	    (*pdraw->destroyDrawable)(pdraw);
+	    pdraw->destroyDrawable(pdraw);
 	    __glxHashDelete(priv->drawHash, gc->currentReadable);
 	 }
       }
@@ -497,6 +414,7 @@ dri2_convert_glx_attribs(unsigned num_attribs, const uint32_t *attribs,
 {
    unsigned i;
    bool got_profile = false;
+   int no_error = 0;
    uint32_t profile;
 
    *major_ver = 1;
@@ -528,6 +446,9 @@ dri2_convert_glx_attribs(unsigned num_attribs, const uint32_t *attribs,
 	 break;
       case GLX_CONTEXT_FLAGS_ARB:
 	 *flags = attribs[i * 2 + 1];
+	 break;
+      case GLX_CONTEXT_OPENGL_NO_ERROR_ARB:
+	 no_error = attribs[i * 2 + 1];
 	 break;
       case GLX_CONTEXT_PROFILE_MASK_ARB:
 	 profile = attribs[i * 2 + 1];
@@ -570,6 +491,10 @@ dri2_convert_glx_attribs(unsigned num_attribs, const uint32_t *attribs,
       }
    }
 
+   if (no_error) {
+      *flags |= __DRI_CTX_FLAG_NO_ERROR;
+   }
+
    if (!got_profile) {
       if (*major_ver > 3 || (*major_ver == 3 && *minor_ver >= 2))
 	 *api = __DRI_API_OPENGL_CORE;
@@ -610,7 +535,8 @@ dri2_convert_glx_attribs(unsigned num_attribs, const uint32_t *attribs,
    /* Unknown flag value.
     */
    if (*flags & ~(__DRI_CTX_FLAG_DEBUG | __DRI_CTX_FLAG_FORWARD_COMPATIBLE
-                  | __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS)) {
+                  | __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS
+                  | __DRI_CTX_FLAG_NO_ERROR)) {
       *error = __DRI_CTX_ERROR_UNKNOWN_FLAG;
       return false;
    }
@@ -633,6 +559,201 @@ dri2_convert_glx_attribs(unsigned num_attribs, const uint32_t *attribs,
 
    *error = __DRI_CTX_ERROR_SUCCESS;
    return true;
+}
+
+_X_HIDDEN bool
+dri2_check_no_error(uint32_t flags, struct glx_context *share_context,
+                    int major, unsigned *error)
+{
+   Bool noError = flags & __DRI_CTX_FLAG_NO_ERROR;
+
+   /* The KHR_no_error specs say:
+    *
+    *    Requires OpenGL ES 2.0 or OpenGL 2.0.
+    */
+   if (noError && major < 2) {
+      *error = __DRI_CTX_ERROR_UNKNOWN_ATTRIBUTE;
+      return false;
+   }
+
+   /* The GLX_ARB_create_context_no_error specs say:
+    *
+    *    BadMatch is generated if the value of GLX_CONTEXT_OPENGL_NO_ERROR_ARB
+    *    used to create <share_context> does not match the value of
+    *    GLX_CONTEXT_OPENGL_NO_ERROR_ARB for the context being created.
+    */
+   if (share_context && !!share_context->noError != !!noError) {
+      *error = __DRI_CTX_ERROR_BAD_FLAG;
+      return false;
+   }
+
+   /* The GLX_ARB_create_context_no_error specs say:
+    *
+    *    BadMatch is generated if the GLX_CONTEXT_OPENGL_NO_ERROR_ARB is TRUE at
+    *    the same time as a debug or robustness context is specified.
+    *
+    */
+   if (noError && ((flags & __DRI_CTX_FLAG_DEBUG) ||
+                   (flags & __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS))) {
+      *error = __DRI_CTX_ERROR_BAD_FLAG;
+      return false;
+   }
+
+   return true;
+}
+
+/*
+ * Given a display pointer and screen number, determine the name of
+ * the DRI driver for the screen (i.e., "i965", "radeon", "nouveau", etc).
+ * Return True for success, False for failure.
+ */
+static Bool
+driGetDriverName(Display * dpy, int scrNum, char **driverName)
+{
+   struct glx_screen *glx_screen = GetGLXScreenConfigs(dpy, scrNum);
+
+   if (!glx_screen || !glx_screen->vtable->get_driver_name)
+      return False;
+
+   *driverName = glx_screen->vtable->get_driver_name(glx_screen);
+   return True;
+}
+
+/*
+ * Exported function for querying the DRI driver for a given screen.
+ *
+ * The returned char pointer points to a static array that will be
+ * overwritten by subsequent calls.
+ */
+_GLX_PUBLIC const char *
+glXGetScreenDriver(Display * dpy, int scrNum)
+{
+   static char ret[32];
+   char *driverName;
+
+   if (driGetDriverName(dpy, scrNum, &driverName)) {
+      int len;
+      if (!driverName)
+         return NULL;
+      len = strlen(driverName);
+      if (len >= 31)
+         return NULL;
+      memcpy(ret, driverName, len + 1);
+      free(driverName);
+      return ret;
+   }
+   return NULL;
+}
+
+/* glXGetDriverConfig must return a pointer with a static lifetime. To avoid
+ * keeping drivers loaded and other leaks, we keep a cache of results here that
+ * is cleared by an atexit handler.
+ */
+struct driver_config_entry {
+   struct driver_config_entry *next;
+   char *driverName;
+   char *config;
+};
+
+static pthread_mutex_t driver_config_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct driver_config_entry *driver_config_cache = NULL;
+
+/* Called as an atexit function. Otherwise, this would have to be called with
+ * driver_config_mutex locked.
+ */
+static void
+clear_driver_config_cache()
+{
+   while (driver_config_cache) {
+      struct driver_config_entry *e = driver_config_cache;
+      driver_config_cache = e->next;
+
+      free(e->driverName);
+      free(e->config);
+      free(e);
+   }
+}
+
+static char *
+get_driver_config(const char *driverName)
+{
+   void *handle;
+   char *config = NULL;
+   const __DRIextension **extensions = driOpenDriver(driverName, &handle);
+   if (extensions) {
+      for (int i = 0; extensions[i]; i++) {
+         if (strcmp(extensions[i]->name, __DRI_CONFIG_OPTIONS) != 0)
+            continue;
+
+         __DRIconfigOptionsExtension *ext =
+            (__DRIconfigOptionsExtension *)extensions[i];
+
+         if (ext->base.version >= 2)
+            config = ext->getXml(driverName);
+         else
+            config = strdup(ext->xml);
+
+         break;
+      }
+   }
+
+   if (!config) {
+      /* Fall back to the old method */
+      config = dlsym(handle, "__driConfigOptions");
+      if (config)
+         config = strdup(config);
+   }
+
+   dlclose(handle);
+
+   return config;
+}
+
+/*
+ * Exported function for obtaining a driver's option list (UTF-8 encoded XML).
+ *
+ * The returned char pointer points directly into the driver. Therefore
+ * it should be treated as a constant.
+ *
+ * If the driver was not found or does not support configuration NULL is
+ * returned.
+ */
+_GLX_PUBLIC const char *
+glXGetDriverConfig(const char *driverName)
+{
+   struct driver_config_entry *e;
+
+   pthread_mutex_lock(&driver_config_mutex);
+
+   for (e = driver_config_cache; e; e = e->next) {
+      if (strcmp(e->driverName, driverName) == 0)
+         goto out;
+   }
+
+   e = malloc(sizeof(*e));
+   if (!e)
+      goto out;
+
+   e->config = get_driver_config(driverName);
+   e->driverName = strdup(driverName);
+   if (!e->config || !e->driverName) {
+      free(e->config);
+      free(e->driverName);
+      free(e);
+      e = NULL;
+      goto out;
+   }
+
+   e->next = driver_config_cache;
+   driver_config_cache = e;
+
+   if (!e->next)
+      atexit(clear_driver_config_cache);
+
+out:
+   pthread_mutex_unlock(&driver_config_mutex);
+
+   return e ? e->config : NULL;
 }
 
 #endif /* GLX_DIRECT_RENDERING */

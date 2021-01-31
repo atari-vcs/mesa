@@ -34,7 +34,7 @@
 #define PIPE_LOADER_H
 
 #include "pipe/p_compiler.h"
-#include "state_tracker/drm_driver.h"
+#include "frontend/drm_driver.h"
 #include "util/xmlconfig.h"
 
 #ifdef __cplusplus
@@ -89,16 +89,6 @@ pipe_loader_probe(struct pipe_loader_device **devs, int ndev);
  */
 struct pipe_screen *
 pipe_loader_create_screen(struct pipe_loader_device *dev);
-
-/**
- * Query the configuration parameters for the specified device.
- *
- * \param dev Device that will be queried.
- * \param conf The drm_conf id of the option to be queried.
- */
-const struct drm_conf_ret *
-pipe_loader_configuration(struct pipe_loader_device *dev,
-                          enum drm_conf conf);
 
 /**
  * Ensure that dev->option_cache is initialized appropriately for the driver.
@@ -209,14 +199,12 @@ bool
 pipe_loader_drm_probe_fd(struct pipe_loader_device **dev, int fd);
 
 /**
- * Get the driinfo XML used for the DRM driver of the given name, if any.
+ * Get the dri options used for the DRM driver of the given name, if any.
  *
- * The returned string is heap-allocated.
+ * The returned array is heap-allocated.
  */
-char *
-pipe_loader_drm_get_driinfo_xml(const char *driver_name);
-
-extern const char gallium_driinfo_xml[];
+const struct driOptionDescription *
+pipe_loader_drm_get_driconf_by_name(const char *driver_name, unsigned *count);
 
 #ifdef __cplusplus
 }

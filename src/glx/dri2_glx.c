@@ -50,7 +50,7 @@
 #include "dri2_priv.h"
 #include "loader.h"
 
-/* From xmlpool/options.h, user exposed so should be stable */
+/* From driconf.h, user exposed so should be stable */
 #define DRI_CONF_VBLANK_NEVER 0
 #define DRI_CONF_VBLANK_DEF_INTERVAL_0 1
 #define DRI_CONF_VBLANK_DEF_INTERVAL_1 2
@@ -263,6 +263,10 @@ dri2_create_context_attribs(struct glx_screen *base,
                                  &api, &reset, &release, error))
       goto error_exit;
 
+   if (!dri2_check_no_error(flags, shareList, major_ver, error)) {
+      goto error_exit;
+   }
+
    /* Check the renderType value */
    if (!validate_renderType_against_config(config_base, renderType))
        goto error_exit;
@@ -313,6 +317,9 @@ dri2_create_context_attribs(struct glx_screen *base,
     *  of GLX_RGBA_TYPE.
     */
    pcp->base.renderType = renderType;
+
+   if (flags & __DRI_CTX_FLAG_NO_ERROR)
+      pcp->base.noError = GL_TRUE;
 
    pcp->driContext =
       (*psc->dri2->createContextAttribs) (psc->driScreen,
@@ -592,7 +599,7 @@ __dri2CopySubBuffer(__GLXDRIdrawable *pdraw, int x, int y,
    flags = __DRI2_FLUSH_DRAWABLE;
    if (flush)
       flags |= __DRI2_FLUSH_CONTEXT;
-   dri2Flush(psc, ctx, priv, flags, __DRI2_THROTTLE_SWAPBUFFER);
+   dri2Flush(psc, ctx, priv, flags, __DRI2_THROTTLE_COPYSUBBUFFER);
 
    region = XFixesCreateRegion(psc->base.dpy, &xrect, 1);
    DRI2CopyRegion(psc->base.dpy, pdraw->xDrawable, region,
@@ -709,6 +716,7 @@ dri2DestroyScreen(struct glx_screen *base)
    /* Free the direct rendering per screen data */
    (*psc->core->destroyScreen) (psc->driScreen);
    driDestroyConfigs(psc->driver_configs);
+   free(psc->driverName);
    close(psc->fd);
    free(psc);
 }
@@ -769,7 +777,7 @@ static void show_fps(struct dri2_drawable *draw)
 
    if (draw->previous_time + interval * 1000000 <= current_time) {
       if (draw->previous_time) {
-         fprintf(stderr, "libGL: FPS = %.1f\n",
+         fprintf(stderr, "libGL: FPS = %.2f\n",
                  ((uint64_t)draw->frames * 1000000) /
                  (double)(current_time - draw->previous_time));
       }
@@ -1011,7 +1019,7 @@ dri2InvalidateBuffers(Display *dpy, XID drawable)
 
    psc = (struct dri2_screen *) pdraw->psc;
 
-   if (pdraw && psc->f && psc->f->base.version >= 3 && psc->f->invalidate)
+   if (psc->f && psc->f->base.version >= 3 && psc->f->invalidate)
        psc->f->invalidate(pdp->driDrawable);
 }
 
@@ -1102,6 +1110,7 @@ dri2BindExtensions(struct dri2_screen *psc, struct glx_display * priv,
 
    extensions = psc->core->getExtensions(psc->driScreen);
 
+   __glXEnableDirectExtension(&psc->base, "GLX_EXT_swap_control");
    __glXEnableDirectExtension(&psc->base, "GLX_SGI_swap_control");
    __glXEnableDirectExtension(&psc->base, "GLX_MESA_swap_control");
    __glXEnableDirectExtension(&psc->base, "GLX_SGI_make_current_read");
@@ -1164,6 +1173,14 @@ dri2BindExtensions(struct dri2_screen *psc, struct glx_display * priv,
          __glXEnableDirectExtension(&psc->base,
                                     "GLX_ARB_create_context_robustness");
 
+      /* DRI2 version 3 is also required because
+       * GLX_ARB_create_context_no_error requires GLX_ARB_create_context.
+       */
+      if (psc->dri2->base.version >= 3
+          && strcmp(extensions[i]->name, __DRI2_NO_ERROR) == 0)
+         __glXEnableDirectExtension(&psc->base,
+                                    "GLX_ARB_create_context_no_error");
+
       /* DRI2 version 3 is also required because GLX_MESA_query_renderer
        * requires GLX_ARB_create_context_profile.
        */
@@ -1186,11 +1203,20 @@ dri2BindExtensions(struct dri2_screen *psc, struct glx_display * priv,
    }
 }
 
+static char *
+dri2_get_driver_name(struct glx_screen *glx_screen)
+{
+    struct dri2_screen *psc = (struct dri2_screen *)glx_screen;
+
+    return psc->driverName;
+}
+
 static const struct glx_screen_vtable dri2_screen_vtable = {
    .create_context         = dri2_create_context,
    .create_context_attribs = dri2_create_context_attribs,
    .query_renderer_integer = dri2_query_renderer_integer,
    .query_renderer_string  = dri2_query_renderer_string,
+   .get_driver_name        = dri2_get_driver_name,
 };
 
 static struct glx_screen *
@@ -1229,7 +1255,7 @@ dri2CreateScreen(int screen, struct glx_display * priv)
 
    psc->fd = loader_open_device(deviceName);
    if (psc->fd < 0) {
-      ErrorMessageF("failed to open drm device: %s\n", strerror(errno));
+      ErrorMessageF("failed to open %s: %s\n", deviceName, strerror(errno));
       goto handle_error;
    }
 
@@ -1251,14 +1277,9 @@ dri2CreateScreen(int screen, struct glx_display * priv)
       free(driverName);
       driverName = loader_driverName;
    }
+   psc->driverName = driverName;
 
-   psc->driver = driOpenDriver(driverName);
-   if (psc->driver == NULL) {
-      ErrorMessageF("driver pointer missing\n");
-      goto handle_error;
-   }
-
-   extensions = driGetDriverExtensions(psc->driver, driverName);
+   extensions = driOpenDriver(driverName, &psc->driver);
    if (extensions == NULL)
       goto handle_error;
 
@@ -1341,12 +1362,22 @@ dri2CreateScreen(int screen, struct glx_display * priv)
                                  &disable) || !disable)
       __glXEnableDirectExtension(&psc->base, "GLX_SGI_video_sync");
 
+   if (psc->config->base.version > 1 &&
+          psc->config->configQuerys(psc->driScreen, "glx_extension_override",
+                                    &tmp) == 0)
+      __glXParseExtensionOverride(&psc->base, tmp);
+
+   if (psc->config->base.version > 1 &&
+          psc->config->configQuerys(psc->driScreen,
+                                    "indirect_gl_extension_override",
+                                    &tmp) == 0)
+      __IndirectGlParseExtensionOverride(&psc->base, tmp);
+
    /* DRI2 supports SubBuffer through DRI2CopyRegion, so it's always
     * available.*/
    psp->copySubBuffer = dri2CopySubBuffer;
    __glXEnableDirectExtension(&psc->base, "GLX_MESA_copy_sub_buffer");
 
-   free(driverName);
    free(deviceName);
 
    tmp = getenv("LIBGL_SHOW_FPS");
@@ -1373,7 +1404,6 @@ handle_error:
    if (psc->driver)
       dlclose(psc->driver);
 
-   free(driverName);
    free(deviceName);
    glx_screen_cleanup(&psc->base);
    free(psc);

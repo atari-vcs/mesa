@@ -9,31 +9,12 @@ This repository lives at https://gitlab.freedesktop.org/mesa/mesa.
 Other repositories are likely forks, and code found there is not supported.
 
 
-Build status
-------------
-
-Travis:
-
-.. image:: https://travis-ci.org/mesa3d/mesa.svg?branch=master
-    :target: https://travis-ci.org/mesa3d/mesa
-
-Appveyor:
-
-.. image:: https://img.shields.io/appveyor/ci/mesa3d/mesa.svg
-    :target: https://ci.appveyor.com/project/mesa3d/mesa
-
-Coverity:
-
-.. image:: https://scan.coverity.com/projects/139/badge.svg?flat=1
-    :target: https://scan.coverity.com/projects/mesa
-
-
 Build & install
 ---------------
 
-You can find more information in our documentation (`docs/install.html
+You can find more information in our documentation (`docs/install.rst
 <https://mesa3d.org/install.html>`_), but the recommended way is to use
-Meson (`docs/meson.html <https://mesa3d.org/meson.html>`_):
+Meson (`docs/meson.rst <https://mesa3d.org/meson.html>`_):
 
 .. code-block:: sh
 
@@ -65,15 +46,14 @@ Bug reports
 -----------
 
 If you think something isn't working properly, please file a bug report
-(`docs/bugs.html <https://mesa3d.org/bugs.html>`_).
+(`docs/bugs.rst <https://mesa3d.org/bugs.html>`_).
 
 
 Contributing
 ------------
 
 Contributions are welcome, and step-by-step instructions can be found in our
-documentation (`docs/submittingpatches.html
+documentation (`docs/submittingpatches.rst
 <https://mesa3d.org/submittingpatches.html>`_).
 
-Note that Mesa uses email mailing-lists for patches submission, review and
-discussions.
+Note that Mesa uses gitlab for patches submission, review and discussions.

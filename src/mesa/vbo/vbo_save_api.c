@@ -82,6 +82,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/state.h"
 #include "main/varray.h"
 #include "util/bitscan.h"
+#include "util/u_memory.h"
 
 #include "vbo_noop.h"
 #include "vbo_private.h"
@@ -100,6 +101,14 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 /* An interesting VBO number/name to help with debugging */
 #define VBO_BUF_ID  12345
 
+static void GLAPIENTRY
+_save_Materialfv(GLenum face, GLenum pname, const GLfloat *params);
+
+static void GLAPIENTRY
+_save_EvalCoord1f(GLfloat u);
+
+static void GLAPIENTRY
+_save_EvalCoord2f(GLfloat u, GLfloat v);
 
 /*
  * NOTE: Old 'parity' issue is gone, but copying can still be
@@ -111,79 +120,15 @@ copy_vertices(struct gl_context *ctx,
               const fi_type * src_buffer)
 {
    struct vbo_save_context *save = &vbo_context(ctx)->save;
-   const struct _mesa_prim *prim = &node->prims[node->prim_count - 1];
-   GLuint nr = prim->count;
+   struct _mesa_prim *prim = &node->prims[node->prim_count - 1];
    GLuint sz = save->vertex_size;
    const fi_type *src = src_buffer + prim->start * sz;
    fi_type *dst = save->copied.buffer;
-   GLuint ovf, i;
 
    if (prim->end)
       return 0;
 
-   switch (prim->mode) {
-   case GL_POINTS:
-      return 0;
-   case GL_LINES:
-      ovf = nr & 1;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_TRIANGLES:
-      ovf = nr % 3;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_QUADS:
-      ovf = nr & 3;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_LINE_STRIP:
-      if (nr == 0)
-         return 0;
-      else {
-         memcpy(dst, src + (nr - 1) * sz, sz * sizeof(GLfloat));
-         return 1;
-      }
-   case GL_LINE_LOOP:
-   case GL_TRIANGLE_FAN:
-   case GL_POLYGON:
-      if (nr == 0)
-         return 0;
-      else if (nr == 1) {
-         memcpy(dst, src + 0, sz * sizeof(GLfloat));
-         return 1;
-      }
-      else {
-         memcpy(dst, src + 0, sz * sizeof(GLfloat));
-         memcpy(dst + sz, src + (nr - 1) * sz, sz * sizeof(GLfloat));
-         return 2;
-      }
-   case GL_TRIANGLE_STRIP:
-   case GL_QUAD_STRIP:
-      switch (nr) {
-      case 0:
-         ovf = 0;
-         break;
-      case 1:
-         ovf = 1;
-         break;
-      default:
-         ovf = 2 + (nr & 1);
-         break;
-      }
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   default:
-      unreachable("Unexpected primitive type");
-      return 0;
-   }
+   return vbo_copy_vertices(ctx, prim->mode, prim, sz, true, dst, src);
 }
 
 
@@ -337,7 +282,7 @@ reset_counters(struct gl_context *ctx)
  * previous prim.
  */
 static void
-merge_prims(struct _mesa_prim *prim_list,
+merge_prims(struct gl_context *ctx, struct _mesa_prim *prim_list,
             GLuint *prim_count)
 {
    GLuint i;
@@ -348,11 +293,10 @@ merge_prims(struct _mesa_prim *prim_list,
 
       vbo_try_prim_conversion(this_prim);
 
-      if (vbo_can_merge_prims(prev_prim, this_prim)) {
+      if (vbo_merge_draws(ctx, true, prev_prim, this_prim)) {
          /* We've found a prim that just extend the previous one.  Tack it
           * onto the previous one, and let this primitive struct get dropped.
           */
-         vbo_merge_prims(prev_prim, this_prim);
          continue;
       }
 
@@ -426,7 +370,7 @@ compare_vao(gl_vertex_processing_mode mode,
       return false;
 
    /* If the enabled arrays are not the same we are not equal. */
-   if (vao_enabled != vao->_Enabled)
+   if (vao_enabled != vao->Enabled)
       return false;
 
    /* Check the buffer binding at 0 */
@@ -450,15 +394,14 @@ compare_vao(gl_vertex_processing_mode mode,
       const struct gl_array_attributes *attrib = &vao->VertexAttrib[attr];
       if (attrib->RelativeOffset + vao->BufferBinding[0].Offset != off)
          return false;
-      if (attrib->Type != tp)
+      if (attrib->Format.Type != tp)
          return false;
-      if (attrib->Size != size[vbo_attr])
+      if (attrib->Format.Size != size[vbo_attr])
          return false;
-      assert(attrib->Format == GL_RGBA);
-      assert(attrib->Enabled == GL_TRUE);
-      assert(attrib->Normalized == GL_FALSE);
-      assert(attrib->Integer == vbo_attrtype_to_integer_flag(tp));
-      assert(attrib->Doubles == vbo_attrtype_to_double_flag(tp));
+      assert(attrib->Format.Format == GL_RGBA);
+      assert(attrib->Format.Normalized == GL_FALSE);
+      assert(attrib->Format.Integer == vbo_attrtype_to_integer_flag(tp));
+      assert(attrib->Format.Doubles == vbo_attrtype_to_double_flag(tp));
       assert(attrib->BufferBindingIndex == 0);
    }
 
@@ -499,7 +442,8 @@ update_vao(struct gl_context *ctx,
     */
 
    /* Bind the buffer object at binding point 0 */
-   _mesa_bind_vertex_buffer(ctx, *vao, 0, bo, buffer_offset, stride);
+   _mesa_bind_vertex_buffer(ctx, *vao, 0, bo, buffer_offset, stride, false,
+                            false);
 
    /* Retrieve the mapping from VBO_ATTRIB to VERT_ATTRIB space
     * Note that the position/generic0 aliasing is done in the VAO.
@@ -515,9 +459,9 @@ update_vao(struct gl_context *ctx,
       _vbo_set_attrib_format(ctx, *vao, vao_attr, buffer_offset,
                              size[vbo_attr], type[vbo_attr], offset[vbo_attr]);
       _mesa_vertex_attrib_binding(ctx, *vao, vao_attr, 0);
-      _mesa_enable_vertex_array_attrib(ctx, *vao, vao_attr);
    }
-   assert(vao_enabled == (*vao)->_Enabled);
+   _mesa_enable_vertex_array_attribs(ctx, *vao, vao_enabled);
+   assert(vao_enabled == (*vao)->Enabled);
    assert((vao_enabled & ~(*vao)->VertexAttribBufferMask) == 0);
 
    /* Finalize and freeze the VAO */
@@ -643,7 +587,7 @@ compile_vertex_list(struct gl_context *ctx)
       convert_line_loop_to_strip(save, node);
    }
 
-   merge_prims(node->prims, &node->prim_count);
+   merge_prims(ctx, node->prims, &node->prim_count);
 
    /* Correct the primitive starts, we can only do this here as copy_vertices
     * and convert_line_loop_to_strip above consume the uncorrected starts.
@@ -738,12 +682,8 @@ wrap_buffers(struct gl_context *ctx)
    save->prims[0].mode = mode;
    save->prims[0].begin = 0;
    save->prims[0].end = 0;
-   save->prims[0].pad = 0;
    save->prims[0].start = 0;
    save->prims[0].count = 0;
-   save->prims[0].num_instances = 1;
-   save->prims[0].base_instance = 0;
-   save->prims[0].is_indirect = 0;
    save->prim_count = 1;
 }
 
@@ -807,10 +747,13 @@ copy_from_current(struct gl_context *ctx)
       switch (save->attrsz[i]) {
       case 4:
          save->attrptr[i][3] = save->current[i][3];
+         /* fallthrough */
       case 3:
          save->attrptr[i][2] = save->current[i][2];
+         /* fallthrough */
       case 2:
          save->attrptr[i][1] = save->current[i][1];
+         /* fallthrough */
       case 1:
          save->attrptr[i][0] = save->current[i][0];
          break;
@@ -977,6 +920,20 @@ reset_vertex(struct gl_context *ctx)
    }
 
    save->vertex_size = 0;
+}
+
+
+/**
+ * If index=0, does glVertexAttrib*() alias glVertex() to emit a vertex?
+ * It depends on a few things, including whether we're inside or outside
+ * of glBegin/glEnd.
+ */
+static inline bool
+is_vertex_position(const struct gl_context *ctx, GLuint index)
+{
+   return (index == 0 &&
+           _mesa_attr_zero_aliases_vertex(ctx) &&
+           _mesa_inside_dlist_begin_end(ctx));
 }
 
 
@@ -1199,16 +1156,14 @@ vbo_save_NotifyBegin(struct gl_context *ctx, GLenum mode,
    struct vbo_save_context *save = &vbo_context(ctx)->save;
    const GLuint i = save->prim_count++;
 
+   ctx->Driver.CurrentSavePrimitive = mode;
+
    assert(i < save->prim_max);
    save->prims[i].mode = mode & VBO_SAVE_PRIM_MODE_MASK;
    save->prims[i].begin = 1;
    save->prims[i].end = 0;
-   save->prims[i].pad = 0;
    save->prims[i].start = save->vert_count;
    save->prims[i].count = 0;
-   save->prims[i].num_instances = 1;
-   save->prims[i].base_instance = 0;
-   save->prims[i].is_indirect = 0;
 
    save->no_current_update = no_current_update;
 
@@ -1280,7 +1235,7 @@ _save_PrimitiveRestartNV(void)
       bool no_current_update = save->no_current_update;
 
       /* restart primitive */
-      CALL_End(GET_DISPATCH(), ());
+      CALL_End(ctx->CurrentServerDispatch, ());
       vbo_save_NotifyBegin(ctx, curPrim, no_current_update);
    }
 }
@@ -1295,12 +1250,57 @@ static void GLAPIENTRY
 _save_OBE_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
 {
    GET_CURRENT_CONTEXT(ctx);
+   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
+
    vbo_save_NotifyBegin(ctx, GL_QUADS, false);
-   CALL_Vertex2f(GET_DISPATCH(), (x1, y1));
-   CALL_Vertex2f(GET_DISPATCH(), (x2, y1));
-   CALL_Vertex2f(GET_DISPATCH(), (x2, y2));
-   CALL_Vertex2f(GET_DISPATCH(), (x1, y2));
-   CALL_End(GET_DISPATCH(), ());
+   CALL_Vertex2f(dispatch, (x1, y1));
+   CALL_Vertex2f(dispatch, (x2, y1));
+   CALL_Vertex2f(dispatch, (x2, y2));
+   CALL_Vertex2f(dispatch, (x1, y2));
+   CALL_End(dispatch, ());
+}
+
+
+static void GLAPIENTRY
+_save_OBE_Rectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2)
+{
+   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+}
+
+static void GLAPIENTRY
+_save_OBE_Rectdv(const GLdouble *v1, const GLdouble *v2)
+{
+   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
+}
+
+static void GLAPIENTRY
+_save_OBE_Rectfv(const GLfloat *v1, const GLfloat *v2)
+{
+   _save_OBE_Rectf(v1[0], v1[1], v2[0], v2[1]);
+}
+
+static void GLAPIENTRY
+_save_OBE_Recti(GLint x1, GLint y1, GLint x2, GLint y2)
+{
+   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+}
+
+static void GLAPIENTRY
+_save_OBE_Rectiv(const GLint *v1, const GLint *v2)
+{
+   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
+}
+
+static void GLAPIENTRY
+_save_OBE_Rects(GLshort x1, GLshort y1, GLshort x2, GLshort y2)
+{
+   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+}
+
+static void GLAPIENTRY
+_save_OBE_Rectsv(const GLshort *v1, const GLshort *v2)
+{
+   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
 }
 
 
@@ -1308,6 +1308,7 @@ static void GLAPIENTRY
 _save_OBE_DrawArrays(GLenum mode, GLint start, GLsizei count)
 {
    GET_CURRENT_CONTEXT(ctx);
+   struct gl_vertex_array_object *vao = ctx->Array.VAO;
    struct vbo_save_context *save = &vbo_context(ctx)->save;
    GLint i;
 
@@ -1326,15 +1327,15 @@ _save_OBE_DrawArrays(GLenum mode, GLint start, GLsizei count)
    /* Make sure to process any VBO binding changes */
    _mesa_update_state(ctx);
 
-   _ae_map_vbos(ctx);
+   _mesa_vao_map_arrays(ctx, vao, GL_MAP_READ_BIT);
 
    vbo_save_NotifyBegin(ctx, mode, true);
 
    for (i = 0; i < count; i++)
-      CALL_ArrayElement(GET_DISPATCH(), (start + i));
-   CALL_End(GET_DISPATCH(), ());
+      _mesa_array_element(ctx, start + i);
+   CALL_End(ctx->CurrentServerDispatch, ());
 
-   _ae_unmap_vbos(ctx);
+   _mesa_vao_unmap_arrays(ctx, vao);
 }
 
 
@@ -1372,6 +1373,29 @@ _save_OBE_MultiDrawArrays(GLenum mode, const GLint *first,
 }
 
 
+static void
+array_element(struct gl_context *ctx,
+              GLint basevertex, GLuint elt, unsigned index_size)
+{
+   /* Section 10.3.5 Primitive Restart:
+    * [...]
+    *    When one of the *BaseVertex drawing commands specified in section 10.5
+    * is used, the primitive restart comparison occurs before the basevertex
+    * offset is added to the array index.
+    */
+   /* If PrimitiveRestart is enabled and the index is the RestartIndex
+    * then we call PrimitiveRestartNV and return.
+    */
+   if (ctx->Array._PrimitiveRestart &&
+       elt == ctx->Array._RestartIndex[index_size - 1]) {
+      CALL_PrimitiveRestartNV(ctx->CurrentServerDispatch, ());
+      return;
+   }
+
+   _mesa_array_element(ctx, basevertex + elt);
+}
+
+
 /* Could do better by copying the arrays and element list intact and
  * then emitting an indexed prim at runtime.
  */
@@ -1381,7 +1405,8 @@ _save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
 {
    GET_CURRENT_CONTEXT(ctx);
    struct vbo_save_context *save = &vbo_context(ctx)->save;
-   struct gl_buffer_object *indexbuf = ctx->Array.VAO->IndexBufferObj;
+   struct gl_vertex_array_object *vao = ctx->Array.VAO;
+   struct gl_buffer_object *indexbuf = vao->IndexBufferObj;
    GLint i;
 
    if (!_mesa_is_valid_prim_mode(ctx, mode)) {
@@ -1405,9 +1430,9 @@ _save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
    /* Make sure to process any VBO binding changes */
    _mesa_update_state(ctx);
 
-   _ae_map_vbos(ctx);
+   _mesa_vao_map(ctx, vao, GL_MAP_READ_BIT);
 
-   if (_mesa_is_bufferobj(indexbuf))
+   if (indexbuf)
       indices =
          ADD_POINTERS(indexbuf->Mappings[MAP_INTERNAL].Pointer, indices);
 
@@ -1416,24 +1441,24 @@ _save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
    switch (type) {
    case GL_UNSIGNED_BYTE:
       for (i = 0; i < count; i++)
-         CALL_ArrayElement(GET_DISPATCH(), (basevertex + ((GLubyte *) indices)[i]));
+         array_element(ctx, basevertex, ((GLubyte *) indices)[i], 1);
       break;
    case GL_UNSIGNED_SHORT:
       for (i = 0; i < count; i++)
-         CALL_ArrayElement(GET_DISPATCH(), (basevertex + ((GLushort *) indices)[i]));
+         array_element(ctx, basevertex, ((GLushort *) indices)[i], 2);
       break;
    case GL_UNSIGNED_INT:
       for (i = 0; i < count; i++)
-         CALL_ArrayElement(GET_DISPATCH(), (basevertex + ((GLuint *) indices)[i]));
+         array_element(ctx, basevertex, ((GLuint *) indices)[i], 4);
       break;
    default:
       _mesa_error(ctx, GL_INVALID_ENUM, "glDrawElements(type)");
       break;
    }
 
-   CALL_End(GET_DISPATCH(), ());
+   CALL_End(ctx->CurrentServerDispatch, ());
 
-   _ae_unmap_vbos(ctx);
+   _mesa_vao_unmap(ctx, vao);
 }
 
 static void GLAPIENTRY
@@ -1484,11 +1509,13 @@ static void GLAPIENTRY
 _save_OBE_MultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
                             const GLvoid * const *indices, GLsizei primcount)
 {
+   GET_CURRENT_CONTEXT(ctx);
+   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
    GLsizei i;
 
    for (i = 0; i < primcount; i++) {
       if (count[i] > 0) {
-	 CALL_DrawElements(GET_DISPATCH(), (mode, count[i], type, indices[i]));
+	 CALL_DrawElements(dispatch, (mode, count[i], type, indices[i]));
       }
    }
 }
@@ -1501,11 +1528,13 @@ _save_OBE_MultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count,
                                       GLsizei primcount,
                                       const GLint *basevertex)
 {
+   GET_CURRENT_CONTEXT(ctx);
+   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
    GLsizei i;
 
    for (i = 0; i < primcount; i++) {
       if (count[i] > 0) {
-	 CALL_DrawElementsBaseVertex(GET_DISPATCH(), (mode, count[i], type,
+	 CALL_DrawElementsBaseVertex(dispatch, (mode, count[i], type,
 						      indices[i],
 						      basevertex[i]));
       }
@@ -1519,157 +1548,12 @@ vtxfmt_init(struct gl_context *ctx)
    struct vbo_save_context *save = &vbo_context(ctx)->save;
    GLvertexformat *vfmt = &save->vtxfmt;
 
-   vfmt->ArrayElement = _ae_ArrayElement;
+#define NAME_AE(x) _ae_##x
+#define NAME_CALLLIST(x) _save_##x
+#define NAME(x) _save_##x
+#define NAME_ES(x) _save_##x##ARB
 
-   vfmt->Color3f = _save_Color3f;
-   vfmt->Color3fv = _save_Color3fv;
-   vfmt->Color4f = _save_Color4f;
-   vfmt->Color4fv = _save_Color4fv;
-   vfmt->EdgeFlag = _save_EdgeFlag;
-   vfmt->End = _save_End;
-   vfmt->PrimitiveRestartNV = _save_PrimitiveRestartNV;
-   vfmt->FogCoordfEXT = _save_FogCoordfEXT;
-   vfmt->FogCoordfvEXT = _save_FogCoordfvEXT;
-   vfmt->Indexf = _save_Indexf;
-   vfmt->Indexfv = _save_Indexfv;
-   vfmt->Materialfv = _save_Materialfv;
-   vfmt->MultiTexCoord1fARB = _save_MultiTexCoord1f;
-   vfmt->MultiTexCoord1fvARB = _save_MultiTexCoord1fv;
-   vfmt->MultiTexCoord2fARB = _save_MultiTexCoord2f;
-   vfmt->MultiTexCoord2fvARB = _save_MultiTexCoord2fv;
-   vfmt->MultiTexCoord3fARB = _save_MultiTexCoord3f;
-   vfmt->MultiTexCoord3fvARB = _save_MultiTexCoord3fv;
-   vfmt->MultiTexCoord4fARB = _save_MultiTexCoord4f;
-   vfmt->MultiTexCoord4fvARB = _save_MultiTexCoord4fv;
-   vfmt->Normal3f = _save_Normal3f;
-   vfmt->Normal3fv = _save_Normal3fv;
-   vfmt->SecondaryColor3fEXT = _save_SecondaryColor3fEXT;
-   vfmt->SecondaryColor3fvEXT = _save_SecondaryColor3fvEXT;
-   vfmt->TexCoord1f = _save_TexCoord1f;
-   vfmt->TexCoord1fv = _save_TexCoord1fv;
-   vfmt->TexCoord2f = _save_TexCoord2f;
-   vfmt->TexCoord2fv = _save_TexCoord2fv;
-   vfmt->TexCoord3f = _save_TexCoord3f;
-   vfmt->TexCoord3fv = _save_TexCoord3fv;
-   vfmt->TexCoord4f = _save_TexCoord4f;
-   vfmt->TexCoord4fv = _save_TexCoord4fv;
-   vfmt->Vertex2f = _save_Vertex2f;
-   vfmt->Vertex2fv = _save_Vertex2fv;
-   vfmt->Vertex3f = _save_Vertex3f;
-   vfmt->Vertex3fv = _save_Vertex3fv;
-   vfmt->Vertex4f = _save_Vertex4f;
-   vfmt->Vertex4fv = _save_Vertex4fv;
-   vfmt->VertexAttrib1fARB = _save_VertexAttrib1fARB;
-   vfmt->VertexAttrib1fvARB = _save_VertexAttrib1fvARB;
-   vfmt->VertexAttrib2fARB = _save_VertexAttrib2fARB;
-   vfmt->VertexAttrib2fvARB = _save_VertexAttrib2fvARB;
-   vfmt->VertexAttrib3fARB = _save_VertexAttrib3fARB;
-   vfmt->VertexAttrib3fvARB = _save_VertexAttrib3fvARB;
-   vfmt->VertexAttrib4fARB = _save_VertexAttrib4fARB;
-   vfmt->VertexAttrib4fvARB = _save_VertexAttrib4fvARB;
-
-   vfmt->VertexAttrib1fNV = _save_VertexAttrib1fNV;
-   vfmt->VertexAttrib1fvNV = _save_VertexAttrib1fvNV;
-   vfmt->VertexAttrib2fNV = _save_VertexAttrib2fNV;
-   vfmt->VertexAttrib2fvNV = _save_VertexAttrib2fvNV;
-   vfmt->VertexAttrib3fNV = _save_VertexAttrib3fNV;
-   vfmt->VertexAttrib3fvNV = _save_VertexAttrib3fvNV;
-   vfmt->VertexAttrib4fNV = _save_VertexAttrib4fNV;
-   vfmt->VertexAttrib4fvNV = _save_VertexAttrib4fvNV;
-
-   /* integer-valued */
-   vfmt->VertexAttribI1i = _save_VertexAttribI1i;
-   vfmt->VertexAttribI2i = _save_VertexAttribI2i;
-   vfmt->VertexAttribI3i = _save_VertexAttribI3i;
-   vfmt->VertexAttribI4i = _save_VertexAttribI4i;
-   vfmt->VertexAttribI2iv = _save_VertexAttribI2iv;
-   vfmt->VertexAttribI3iv = _save_VertexAttribI3iv;
-   vfmt->VertexAttribI4iv = _save_VertexAttribI4iv;
-
-   /* unsigned integer-valued */
-   vfmt->VertexAttribI1ui = _save_VertexAttribI1ui;
-   vfmt->VertexAttribI2ui = _save_VertexAttribI2ui;
-   vfmt->VertexAttribI3ui = _save_VertexAttribI3ui;
-   vfmt->VertexAttribI4ui = _save_VertexAttribI4ui;
-   vfmt->VertexAttribI2uiv = _save_VertexAttribI2uiv;
-   vfmt->VertexAttribI3uiv = _save_VertexAttribI3uiv;
-   vfmt->VertexAttribI4uiv = _save_VertexAttribI4uiv;
-
-   vfmt->VertexP2ui = _save_VertexP2ui;
-   vfmt->VertexP3ui = _save_VertexP3ui;
-   vfmt->VertexP4ui = _save_VertexP4ui;
-   vfmt->VertexP2uiv = _save_VertexP2uiv;
-   vfmt->VertexP3uiv = _save_VertexP3uiv;
-   vfmt->VertexP4uiv = _save_VertexP4uiv;
-
-   vfmt->TexCoordP1ui = _save_TexCoordP1ui;
-   vfmt->TexCoordP2ui = _save_TexCoordP2ui;
-   vfmt->TexCoordP3ui = _save_TexCoordP3ui;
-   vfmt->TexCoordP4ui = _save_TexCoordP4ui;
-   vfmt->TexCoordP1uiv = _save_TexCoordP1uiv;
-   vfmt->TexCoordP2uiv = _save_TexCoordP2uiv;
-   vfmt->TexCoordP3uiv = _save_TexCoordP3uiv;
-   vfmt->TexCoordP4uiv = _save_TexCoordP4uiv;
-
-   vfmt->MultiTexCoordP1ui = _save_MultiTexCoordP1ui;
-   vfmt->MultiTexCoordP2ui = _save_MultiTexCoordP2ui;
-   vfmt->MultiTexCoordP3ui = _save_MultiTexCoordP3ui;
-   vfmt->MultiTexCoordP4ui = _save_MultiTexCoordP4ui;
-   vfmt->MultiTexCoordP1uiv = _save_MultiTexCoordP1uiv;
-   vfmt->MultiTexCoordP2uiv = _save_MultiTexCoordP2uiv;
-   vfmt->MultiTexCoordP3uiv = _save_MultiTexCoordP3uiv;
-   vfmt->MultiTexCoordP4uiv = _save_MultiTexCoordP4uiv;
-
-   vfmt->NormalP3ui = _save_NormalP3ui;
-   vfmt->NormalP3uiv = _save_NormalP3uiv;
-
-   vfmt->ColorP3ui = _save_ColorP3ui;
-   vfmt->ColorP4ui = _save_ColorP4ui;
-   vfmt->ColorP3uiv = _save_ColorP3uiv;
-   vfmt->ColorP4uiv = _save_ColorP4uiv;
-
-   vfmt->SecondaryColorP3ui = _save_SecondaryColorP3ui;
-   vfmt->SecondaryColorP3uiv = _save_SecondaryColorP3uiv;
-
-   vfmt->VertexAttribP1ui = _save_VertexAttribP1ui;
-   vfmt->VertexAttribP2ui = _save_VertexAttribP2ui;
-   vfmt->VertexAttribP3ui = _save_VertexAttribP3ui;
-   vfmt->VertexAttribP4ui = _save_VertexAttribP4ui;
-
-   vfmt->VertexAttribP1uiv = _save_VertexAttribP1uiv;
-   vfmt->VertexAttribP2uiv = _save_VertexAttribP2uiv;
-   vfmt->VertexAttribP3uiv = _save_VertexAttribP3uiv;
-   vfmt->VertexAttribP4uiv = _save_VertexAttribP4uiv;
-
-   vfmt->VertexAttribL1d = _save_VertexAttribL1d;
-   vfmt->VertexAttribL2d = _save_VertexAttribL2d;
-   vfmt->VertexAttribL3d = _save_VertexAttribL3d;
-   vfmt->VertexAttribL4d = _save_VertexAttribL4d;
-
-   vfmt->VertexAttribL1dv = _save_VertexAttribL1dv;
-   vfmt->VertexAttribL2dv = _save_VertexAttribL2dv;
-   vfmt->VertexAttribL3dv = _save_VertexAttribL3dv;
-   vfmt->VertexAttribL4dv = _save_VertexAttribL4dv;
-
-   vfmt->VertexAttribL1ui64ARB = _save_VertexAttribL1ui64ARB;
-   vfmt->VertexAttribL1ui64vARB = _save_VertexAttribL1ui64vARB;
-
-   /* This will all require us to fallback to saving the list as opcodes:
-    */
-   vfmt->CallList = _save_CallList;
-   vfmt->CallLists = _save_CallLists;
-
-   vfmt->EvalCoord1f = _save_EvalCoord1f;
-   vfmt->EvalCoord1fv = _save_EvalCoord1fv;
-   vfmt->EvalCoord2f = _save_EvalCoord2f;
-   vfmt->EvalCoord2fv = _save_EvalCoord2fv;
-   vfmt->EvalPoint1 = _save_EvalPoint1;
-   vfmt->EvalPoint2 = _save_EvalPoint2;
-
-   /* These calls all generate GL_INVALID_OPERATION since this vtxfmt is
-    * only used when we're inside a glBegin/End pair.
-    */
-   vfmt->Begin = _save_Begin;
+#include "vbo_init_tmp.h"
 }
 
 
@@ -1689,6 +1573,14 @@ vbo_initialize_save_dispatch(const struct gl_context *ctx,
    SET_MultiDrawElementsEXT(exec, _save_OBE_MultiDrawElements);
    SET_MultiDrawElementsBaseVertex(exec, _save_OBE_MultiDrawElementsBaseVertex);
    SET_Rectf(exec, _save_OBE_Rectf);
+   SET_Rectd(exec, _save_OBE_Rectd);
+   SET_Rectdv(exec, _save_OBE_Rectdv);
+   SET_Rectfv(exec, _save_OBE_Rectfv);
+   SET_Recti(exec, _save_OBE_Recti);
+   SET_Rectiv(exec, _save_OBE_Rectiv);
+   SET_Rects(exec, _save_OBE_Rects);
+   SET_Rectsv(exec, _save_OBE_Rectsv);
+
    /* Note: other glDraw functins aren't compiled into display lists */
 }
 
@@ -1890,5 +1782,5 @@ vbo_save_api_init(struct vbo_save_context *save)
 
    vtxfmt_init(ctx);
    current_init(ctx);
-   _mesa_noop_vtxfmt_init(&save->vtxfmt_noop);
+   _mesa_noop_vtxfmt_init(ctx, &save->vtxfmt_noop);
 }

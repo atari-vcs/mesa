@@ -113,8 +113,7 @@ public:
    {
       this->num_loop_jumps = 0;
       this->contains_calls = false;
-      this->var_hash = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
-                                               _mesa_key_pointer_equal);
+      this->var_hash = _mesa_pointer_hash_table_create(NULL);
       this->limiting_terminator = NULL;
    }
 
@@ -195,8 +194,8 @@ public:
 
 class loop_terminator : public exec_node {
 public:
-   loop_terminator()
-      : ir(NULL), iterations(-1)
+   loop_terminator(ir_if *ir, bool continue_from_then)
+      : ir(ir), iterations(-1), continue_from_then(continue_from_then)
    {
    }
 

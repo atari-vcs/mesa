@@ -33,9 +33,11 @@
 #define SWR_VISIBLE __declspec(dllexport)
 
 #ifndef NOMINMAX
+#undef UNICODE
 #define NOMINMAX
 #include <windows.h>
 #undef NOMINMAX
+#define UNICODE
 #else
 #include <windows.h>
 #endif
@@ -47,7 +49,11 @@
 #undef MemoryFence
 #endif
 
+#if defined(_MSC_VER)
 #define OSALIGN(RWORD, WIDTH) __declspec(align(WIDTH)) RWORD
+#elif defined(__GNUC__)
+#define OSALIGN(RWORD, WIDTH) RWORD __attribute__((aligned(WIDTH)))
+#endif
 
 #if defined(_DEBUG)
 // We compile Debug builds with inline function expansion enabled.  This allows
@@ -59,8 +65,16 @@
 #define INLINE inline
 #pragma inline_depth(0)
 #else
-#define INLINE __forceinline
+// Use of __forceinline increases compile time dramatically in release builds
+// and provides almost 0 measurable benefit.  Disable until we have a compelling
+// use-case
+// #define INLINE __forceinline
+#define INLINE inline
 #endif
+#ifndef FORCEINLINE
+#define FORCEINLINE __forceinline
+#endif
+
 #define DEBUGBREAK __debugbreak()
 
 #define PRAGMA_WARNING_PUSH_DISABLE(...) \
@@ -87,6 +101,34 @@ static inline void AlignedFree(void* p)
 #define BitScanReverseSizeT BitScanReverse
 #define BitScanForwardSizeT BitScanForward
 #define _mm_popcount_sizeT _mm_popcnt_u32
+#endif
+
+#if !defined(_WIN64)
+inline unsigned char _BitScanForward64(unsigned long* Index, uint64_t Mask)
+{
+#ifdef __GNUC__
+    *Index = __builtin_ctzll(Mask);
+#else
+    *Index = 0;
+    for (int i = 0; i < 64; ++ i)
+      if ((1ULL << i) & Mask)
+        *Index = i;
+#endif
+    return (Mask != 0);
+}
+
+inline unsigned char _BitScanReverse64(unsigned long* Index, uint64_t Mask)
+{
+#ifdef __GNUC__
+    *Index = 63 - __builtin_clzll(Mask);
+#else
+    *Index = 0;
+    for (int i = 63; i >= 0; -- i)
+      if ((1ULL << i) & Mask)
+        *Index = i;
+#endif
+    return (Mask != 0);
+}
 #endif
 
 #elif defined(__APPLE__) || defined(FORCE_LINUX) || defined(__linux__) || defined(__gnu_linux__)
@@ -123,6 +165,9 @@ typedef unsigned int DWORD;
 #define OSALIGN(RWORD, WIDTH) RWORD __attribute__((aligned(WIDTH)))
 #ifndef INLINE
 #define INLINE __inline
+#endif
+#ifndef FORCEINLINE
+#define FORCEINLINE INLINE
 #endif
 #define DEBUGBREAK asm("int $3")
 
@@ -163,46 +208,45 @@ inline uint64_t      __rdtsc()
 #endif
 
 #if !defined(__clang__) && !defined(__INTEL_COMPILER)
-// Intrinsic not defined in gcc
+// Intrinsic not defined in gcc < 10
+#if (__GNUC__) && (GCC_VERSION < 100000)
 static INLINE void _mm256_storeu2_m128i(__m128i* hi, __m128i* lo, __m256i a)
 {
     _mm_storeu_si128((__m128i*)lo, _mm256_castsi256_si128(a));
     _mm_storeu_si128((__m128i*)hi, _mm256_extractf128_si256(a, 0x1));
 }
+#endif
 
 // gcc prior to 4.9 doesn't have _mm*_undefined_*
-#if (__GNUC__) && (GCC_VERSION < 409000)
+#if (__GNUC__) && (GCC_VERSION < 40900)
 #define _mm_undefined_si128 _mm_setzero_si128
 #define _mm256_undefined_ps _mm256_setzero_ps
 #endif
 #endif
 
-inline unsigned char _BitScanForward(unsigned long* Index, unsigned long Mask)
+inline unsigned char _BitScanForward64(unsigned long* Index, uint64_t Mask)
+{
+    *Index = __builtin_ctzll(Mask);
+    return (Mask != 0);
+}
+
+inline unsigned char _BitScanForward(unsigned long* Index, uint32_t Mask)
 {
     *Index = __builtin_ctz(Mask);
     return (Mask != 0);
 }
 
-inline unsigned char _BitScanForward(unsigned int* Index, unsigned int Mask)
+inline unsigned char _BitScanReverse64(unsigned long* Index, uint64_t Mask)
 {
-    *Index = __builtin_ctz(Mask);
+    *Index = 63 - __builtin_clzll(Mask);
     return (Mask != 0);
 }
 
-inline unsigned char _BitScanReverse(unsigned long* Index, unsigned long Mask)
+inline unsigned char _BitScanReverse(unsigned long* Index, uint32_t Mask)
 {
-    *Index = __builtin_clz(Mask);
+    *Index = 31 - __builtin_clz(Mask);
     return (Mask != 0);
 }
-
-inline unsigned char _BitScanReverse(unsigned int* Index, unsigned int Mask)
-{
-    *Index = __builtin_clz(Mask);
-    return (Mask != 0);
-}
-
-#define _BitScanForward64 _BitScanForward
-#define _BitScanReverse64 _BitScanReverse
 
 inline void* AlignedMalloc(size_t size, size_t alignment)
 {
@@ -254,9 +298,7 @@ typedef MEGABYTE GIGABYTE[1024];
 
 #define OSALIGNLINE(RWORD) OSALIGN(RWORD, 64)
 #define OSALIGNSIMD(RWORD) OSALIGN(RWORD, KNOB_SIMD_BYTES)
-#if ENABLE_AVX512_SIMD16
 #define OSALIGNSIMD16(RWORD) OSALIGN(RWORD, KNOB_SIMD16_BYTES)
-#endif
 
 #include "common/swr_assert.h"
 
@@ -282,5 +324,26 @@ int SWR_API
             std::string* pOptStdOut     = nullptr,   ///< (Optional Out) Standard Output text
             std::string* pOptStdErr     = nullptr,   ///< (Optional Out) Standard Error text
             const std::string* pOptStdIn = nullptr); ///< (Optional In) Standard Input text
+
+
+/// Helper for setting up FP state
+/// @returns old csr state
+static INLINE uint32_t SetOptimalVectorCSR()
+{
+    uint32_t oldCSR = _mm_getcsr();
+
+    uint32_t newCSR = (oldCSR & ~(_MM_ROUND_MASK | _MM_DENORMALS_ZERO_MASK | _MM_FLUSH_ZERO_MASK));
+    newCSR |= (_MM_ROUND_NEAREST | _MM_FLUSH_ZERO_ON | _MM_DENORMALS_ZERO_ON);
+    _mm_setcsr(newCSR);
+
+    return oldCSR;
+}
+
+/// Set Vector CSR state.
+/// @param csrState - should be value returned from SetOptimalVectorCSR()
+static INLINE void RestoreVectorCSR(uint32_t csrState)
+{
+    _mm_setcsr(csrState);
+}
 
 #endif //__SWR_OS_H__

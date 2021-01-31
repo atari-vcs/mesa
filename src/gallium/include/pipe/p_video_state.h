@@ -151,6 +151,8 @@ struct pipe_picture_desc
 {
    enum pipe_video_profile profile;
    enum pipe_video_entrypoint entry_point;
+   bool protected_playback;
+   uint8_t *decrypt_key;
 };
 
 struct pipe_quant_matrix
@@ -395,6 +397,11 @@ struct pipe_h264_enc_pic_control
 {
    unsigned enc_cabac_enable;
    unsigned enc_constraint_set_flags;
+   unsigned enc_frame_cropping_flag;
+   unsigned enc_frame_crop_left_offset;
+   unsigned enc_frame_crop_right_offset;
+   unsigned enc_frame_crop_top_offset;
+   unsigned enc_frame_crop_bottom_offset;
 };
 
 struct pipe_h264_enc_picture_desc
@@ -426,7 +433,7 @@ struct pipe_h264_enc_picture_desc
 
    bool not_referenced;
    bool enable_vui;
-   struct util_hash_table *frame_idx;
+   struct hash_table *frame_idx;
 
 };
 
@@ -452,6 +459,11 @@ struct pipe_h265_enc_seq_param
    uint8_t  log2_diff_max_min_transform_block_size;
    uint8_t  max_transform_hierarchy_depth_inter;
    uint8_t  max_transform_hierarchy_depth_intra;
+   uint8_t conformance_window_flag;
+   uint16_t conf_win_left_offset;
+   uint16_t conf_win_right_offset;
+   uint16_t conf_win_top_offset;
+   uint16_t conf_win_bottom_offset;
 };
 
 struct pipe_h265_enc_pic_param
@@ -508,7 +520,7 @@ struct pipe_h265_enc_picture_desc
    unsigned ref_idx_l0;
    unsigned ref_idx_l1;
    bool not_referenced;
-   struct util_hash_table *frame_idx;
+   struct hash_table *frame_idx;
 };
 
 struct pipe_h265_sps
@@ -759,6 +771,7 @@ struct pipe_vp9_picture_desc
       int8_t y_dc_delta_q;
       int8_t uv_ac_delta_q;
       int8_t uv_dc_delta_q;
+      uint8_t abs_delta;
    } picture_parameter;
 
    struct {

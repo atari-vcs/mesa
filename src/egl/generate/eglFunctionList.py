@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 """
 Contains a list of EGL functions to generate dispatch functions for.
 
@@ -208,6 +206,13 @@ EGL_FUNCTIONS = (
     _eglFunc("eglQueryDeviceStringEXT",              "device"),
     _eglFunc("eglQueryDevicesEXT",                   "none"),
     _eglFunc("eglQueryDisplayAttribEXT",             "display"),
+
+    # EGL_MESA_query_driver
+    _eglFunc("eglGetDisplayDriverName",              "display"),
+    _eglFunc("eglGetDisplayDriverConfig",            "display"),
+
+    # EGL_KHR_partial_update
+    _eglFunc("eglSetDamageRegionKHR",                "display"),
 
 )
 

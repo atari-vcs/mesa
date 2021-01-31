@@ -306,22 +306,9 @@ vec4_visitor::fix_3src_operand(const src_reg &src)
 }
 
 src_reg
-vec4_visitor::resolve_source_modifiers(const src_reg &src)
-{
-   if (!src.abs && !src.negate)
-      return src;
-
-   dst_reg resolved = dst_reg(this, glsl_type::ivec4_type);
-   resolved.type = src.type;
-   emit(MOV(resolved, src));
-
-   return src_reg(resolved);
-}
-
-src_reg
 vec4_visitor::fix_math_operand(const src_reg &src)
 {
-   if (devinfo->gen < 6 || devinfo->gen >= 8 || src.file == BAD_FILE)
+   if (devinfo->gen < 6 || src.file == BAD_FILE)
       return src;
 
    /* The gen6 math instruction ignores the source modifiers --
@@ -576,7 +563,7 @@ vec4_visitor::emit_pack_snorm_4x8(const dst_reg &dst, const src_reg &src0)
  * false) elements needed to pack a type.
  */
 static int
-type_size_xvec4(const struct glsl_type *type, bool as_vec4)
+type_size_xvec4(const struct glsl_type *type, bool as_vec4, bool bindless)
 {
    unsigned int i;
    int size;
@@ -609,11 +596,14 @@ type_size_xvec4(const struct glsl_type *type, bool as_vec4)
       }
    case GLSL_TYPE_ARRAY:
       assert(type->length > 0);
-      return type_size_xvec4(type->fields.array, as_vec4) * type->length;
+      return type_size_xvec4(type->fields.array, as_vec4, bindless) *
+             type->length;
    case GLSL_TYPE_STRUCT:
+   case GLSL_TYPE_INTERFACE:
       size = 0;
       for (i = 0; i < type->length; i++) {
-	 size += type_size_xvec4(type->fields.structure[i].type, as_vec4);
+	 size += type_size_xvec4(type->fields.structure[i].type, as_vec4,
+                                 bindless);
       }
       return size;
    case GLSL_TYPE_SUBROUTINE:
@@ -623,14 +613,13 @@ type_size_xvec4(const struct glsl_type *type, bool as_vec4)
       /* Samplers take up no register space, since they're baked in at
        * link time.
        */
-      return 0;
+      return bindless ? 1 : 0;
    case GLSL_TYPE_ATOMIC_UINT:
       return 0;
    case GLSL_TYPE_IMAGE:
-      return DIV_ROUND_UP(BRW_IMAGE_PARAM_SIZE, 4);
+      return bindless ? 1 : DIV_ROUND_UP(BRW_IMAGE_PARAM_SIZE, 4);
    case GLSL_TYPE_VOID:
    case GLSL_TYPE_ERROR:
-   case GLSL_TYPE_INTERFACE:
    case GLSL_TYPE_FUNCTION:
       unreachable("not reached");
    }
@@ -649,9 +638,9 @@ type_size_xvec4(const struct glsl_type *type, bool as_vec4)
  * store a particular type.
  */
 extern "C" int
-type_size_vec4(const struct glsl_type *type)
+type_size_vec4(const struct glsl_type *type, bool bindless)
 {
-   return type_size_xvec4(type, true);
+   return type_size_xvec4(type, true, bindless);
 }
 
 /**
@@ -674,9 +663,9 @@ type_size_vec4(const struct glsl_type *type)
  * type fits in one or two vec4 slots.
  */
 extern "C" int
-type_size_dvec4(const struct glsl_type *type)
+type_size_dvec4(const struct glsl_type *type, bool bindless)
 {
-   return type_size_xvec4(type, false);
+   return type_size_xvec4(type, false, bindless);
 }
 
 src_reg::src_reg(class vec4_visitor *v, const struct glsl_type *type)
@@ -684,9 +673,9 @@ src_reg::src_reg(class vec4_visitor *v, const struct glsl_type *type)
    init();
 
    this->file = VGRF;
-   this->nr = v->alloc.allocate(type_size_vec4(type));
+   this->nr = v->alloc.allocate(type_size_vec4(type, false));
 
-   if (type->is_array() || type->is_record()) {
+   if (type->is_array() || type->is_struct()) {
       this->swizzle = BRW_SWIZZLE_NOOP;
    } else {
       this->swizzle = brw_swizzle_for_size(type->vector_elements);
@@ -702,7 +691,7 @@ src_reg::src_reg(class vec4_visitor *v, const struct glsl_type *type, int size)
    init();
 
    this->file = VGRF;
-   this->nr = v->alloc.allocate(type_size_vec4(type) * size);
+   this->nr = v->alloc.allocate(type_size_vec4(type, false) * size);
 
    this->swizzle = BRW_SWIZZLE_NOOP;
 
@@ -714,9 +703,9 @@ dst_reg::dst_reg(class vec4_visitor *v, const struct glsl_type *type)
    init();
 
    this->file = VGRF;
-   this->nr = v->alloc.allocate(type_size_vec4(type));
+   this->nr = v->alloc.allocate(type_size_vec4(type, false));
 
-   if (type->is_array() || type->is_record()) {
+   if (type->is_array() || type->is_struct()) {
       this->writemask = WRITEMASK_XYZW;
    } else {
       this->writemask = (1 << type->vector_elements) - 1;
@@ -732,34 +721,6 @@ vec4_visitor::emit_minmax(enum brw_conditional_mod conditionalmod, dst_reg dst,
    vec4_instruction *inst = emit(BRW_OPCODE_SEL, dst, src0, src1);
    inst->conditional_mod = conditionalmod;
    return inst;
-}
-
-vec4_instruction *
-vec4_visitor::emit_lrp(const dst_reg &dst,
-                       const src_reg &x, const src_reg &y, const src_reg &a)
-{
-   if (devinfo->gen >= 6 && devinfo->gen <= 10) {
-      /* Note that the instruction's argument order is reversed from GLSL
-       * and the IR.
-       */
-     return emit(LRP(dst, fix_3src_operand(a), fix_3src_operand(y),
-                     fix_3src_operand(x)));
-   } else {
-      /* Earlier generations don't support three source operations, so we
-       * need to emit x*(1-a) + y*a.
-       */
-      dst_reg y_times_a           = dst_reg(this, glsl_type::vec4_type);
-      dst_reg one_minus_a         = dst_reg(this, glsl_type::vec4_type);
-      dst_reg x_times_one_minus_a = dst_reg(this, glsl_type::vec4_type);
-      y_times_a.writemask           = dst.writemask;
-      one_minus_a.writemask         = dst.writemask;
-      x_times_one_minus_a.writemask = dst.writemask;
-
-      emit(MUL(y_times_a, y, a));
-      emit(ADD(one_minus_a, negate(a), brw_imm_f(1.0f)));
-      emit(MUL(x_times_one_minus_a, x, src_reg(one_minus_a)));
-      return emit(ADD(dst, src_reg(x_times_one_minus_a), src_reg(y_times_a)));
-   }
 }
 
 /**
@@ -779,35 +740,7 @@ vec4_visitor::emit_pull_constant_load_reg(dst_reg dst,
 
    vec4_instruction *pull;
 
-   if (devinfo->gen >= 9) {
-      /* Gen9+ needs a message header in order to use SIMD4x2 mode */
-      src_reg header(this, glsl_type::uvec4_type, 2);
-
-      pull = new(mem_ctx)
-         vec4_instruction(VS_OPCODE_SET_SIMD4X2_HEADER_GEN9,
-                          dst_reg(header));
-
-      if (before_inst)
-         emit_before(before_block, before_inst, pull);
-      else
-         emit(pull);
-
-      dst_reg index_reg = retype(byte_offset(dst_reg(header), REG_SIZE),
-                                 offset_reg.type);
-      pull = MOV(writemask(index_reg, WRITEMASK_X), offset_reg);
-
-      if (before_inst)
-         emit_before(before_block, before_inst, pull);
-      else
-         emit(pull);
-
-      pull = new(mem_ctx) vec4_instruction(VS_OPCODE_PULL_CONSTANT_LOAD_GEN7,
-                                           dst,
-                                           surf_index,
-                                           header);
-      pull->mlen = 2;
-      pull->header_size = 1;
-   } else if (devinfo->gen >= 7) {
+   if (devinfo->gen >= 7) {
       dst_reg grf_offset = dst_reg(this, glsl_type::uint_type);
 
       grf_offset.type = offset_reg.type;
@@ -863,25 +796,10 @@ vec4_visitor::emit_mcs_fetch(const glsl_type *coordinate_type,
                                     dst_reg(this, glsl_type::uvec4_type));
    inst->base_mrf = 2;
    inst->src[1] = surface;
-   inst->src[2] = surface;
+   inst->src[2] = brw_imm_ud(0); /* sampler */
+   inst->mlen = 1;
 
-   int param_base;
-
-   if (devinfo->gen >= 9) {
-      /* Gen9+ needs a message header in order to use SIMD4x2 mode */
-      vec4_instruction *header_inst = new(mem_ctx)
-         vec4_instruction(VS_OPCODE_SET_SIMD4X2_HEADER_GEN9,
-                          dst_reg(MRF, inst->base_mrf));
-
-      emit(header_inst);
-
-      inst->mlen = 2;
-      inst->header_size = 1;
-      param_base = inst->base_mrf + 1;
-   } else {
-      inst->mlen = 1;
-      param_base = inst->base_mrf;
-   }
+   const int param_base = inst->base_mrf;
 
    /* parameters are: u, v, r, lod; lod will always be zero due to api restrictions */
    int coord_mask = (1 << coordinate_type->vector_elements) - 1;
@@ -900,7 +818,7 @@ vec4_visitor::emit_mcs_fetch(const glsl_type *coordinate_type,
 bool
 vec4_visitor::is_high_sampler(src_reg sampler)
 {
-   if (devinfo->gen < 8 && !devinfo->is_haswell)
+   if (!devinfo->is_haswell)
       return false;
 
    return sampler.file != IMM || sampler.ud >= 16;
@@ -928,8 +846,7 @@ vec4_visitor::emit_texture(ir_texture_opcode op,
    case ir_txl: opcode = SHADER_OPCODE_TXL; break;
    case ir_txd: opcode = SHADER_OPCODE_TXD; break;
    case ir_txf: opcode = SHADER_OPCODE_TXF; break;
-   case ir_txf_ms: opcode = (devinfo->gen >= 9 ? SHADER_OPCODE_TXF_CMS_W :
-                             SHADER_OPCODE_TXF_CMS); break;
+   case ir_txf_ms: opcode = SHADER_OPCODE_TXF_CMS; break;
    case ir_txs: opcode = SHADER_OPCODE_TXS; break;
    case ir_tg4: opcode = offset_value.file != BAD_FILE
                          ? SHADER_OPCODE_TG4_OFFSET : SHADER_OPCODE_TG4; break;
@@ -956,14 +873,13 @@ vec4_visitor::emit_texture(ir_texture_opcode op,
 
    /* The message header is necessary for:
     * - Gen4 (always)
-    * - Gen9+ for selecting SIMD4x2
     * - Texel offsets
     * - Gather channel selection
     * - Sampler indices too large to fit in a 4-bit value.
     * - Sampleinfo message - takes no parameters, but mlen = 0 is illegal
     */
    inst->header_size =
-      (devinfo->gen < 5 || devinfo->gen >= 9 ||
+      (devinfo->gen < 5 ||
        inst->offset != 0 || op == ir_tg4 ||
        op == ir_texture_samples ||
        is_high_sampler(sampler_reg)) ? 1 : 0;
@@ -1028,16 +944,7 @@ vec4_visitor::emit_texture(ir_texture_opcode op,
       } else if (op == ir_txf_ms) {
          emit(MOV(dst_reg(MRF, param_base + 1, sample_index.type, WRITEMASK_X),
                   sample_index));
-         if (opcode == SHADER_OPCODE_TXF_CMS_W) {
-            /* MCS data is stored in the first two channels of ‘mcs’, but we
-             * need to get it into the .y and .z channels of the second vec4
-             * of params.
-             */
-            mcs.swizzle = BRW_SWIZZLE4(0, 0, 1, 1);
-            emit(MOV(dst_reg(MRF, param_base + 1,
-                             glsl_type::uint_type, WRITEMASK_YZ),
-                     mcs));
-         } else if (devinfo->gen >= 7) {
+         if (devinfo->gen >= 7) {
             /* MCS data is in the first channel of `mcs`, but we need to get it into
              * the .y channel of the second vec4 of params, so replicate .x across
              * the whole vec4 and then mask off everything except .y
@@ -1201,12 +1108,14 @@ vec4_visitor::emit_psiz_and_flags(dst_reg reg)
       if (output_reg[VARYING_SLOT_CLIP_DIST0][0].file != BAD_FILE) {
          current_annotation = "Clipping flags";
          dst_reg flags0 = dst_reg(this, glsl_type::uint_type);
-         dst_reg flags1 = dst_reg(this, glsl_type::uint_type);
 
          emit(CMP(dst_null_f(), src_reg(output_reg[VARYING_SLOT_CLIP_DIST0][0]), brw_imm_f(0.0f), BRW_CONDITIONAL_L));
          emit(VS_OPCODE_UNPACK_FLAGS_SIMD4X2, flags0, brw_imm_d(0));
          emit(OR(header1_w, src_reg(header1_w), src_reg(flags0)));
+      }
 
+      if (output_reg[VARYING_SLOT_CLIP_DIST1][0].file != BAD_FILE) {
+         dst_reg flags1 = dst_reg(this, glsl_type::uint_type);
          emit(CMP(dst_null_f(), src_reg(output_reg[VARYING_SLOT_CLIP_DIST1][0]), brw_imm_f(0.0f), BRW_CONDITIONAL_L));
          emit(VS_OPCODE_UNPACK_FLAGS_SIMD4X2, flags1, brw_imm_d(0));
          emit(SHL(flags1, src_reg(flags1), brw_imm_d(4)));
@@ -1335,8 +1244,8 @@ vec4_visitor::emit_urb_slot(dst_reg reg, int varying)
    }
 }
 
-static int
-align_interleaved_urb_mlen(const struct gen_device_info *devinfo, int mlen)
+static unsigned
+align_interleaved_urb_mlen(const struct gen_device_info *devinfo, unsigned mlen)
 {
    if (devinfo->gen >= 6) {
       /* URB data written (does not include the message header reg) must
@@ -1729,11 +1638,6 @@ vec4_visitor::emit_pull_constant_load(bblock_t *block, vec4_instruction *inst,
          offset = src_reg(this, glsl_type::uint_type);
          emit_before(block, inst, ADD(dst_reg(offset), indirect,
                                       brw_imm_ud(reg_offset * 16)));
-      } else if (devinfo->gen >= 8) {
-         /* Store the offset in a GRF so we can send-from-GRF. */
-         offset = src_reg(this, glsl_type::uint_type);
-         emit_before(block, inst, MOV(dst_reg(offset),
-                                      brw_imm_ud(reg_offset * 16)));
       } else {
          offset = brw_imm_d(reg_offset * 16);
       }
@@ -1745,8 +1649,6 @@ vec4_visitor::emit_pull_constant_load(bblock_t *block, vec4_instruction *inst,
 
       src = byte_offset(src, 16);
    }
-
-   brw_mark_surface_used(&prog_data->base, index);
 
    if (is_64bit) {
       temp = retype(temp, BRW_REGISTER_TYPE_DF);
@@ -1867,6 +1769,7 @@ vec4_visitor::vec4_visitor(const struct brw_compiler *compiler,
      prog_data(prog_data),
      fail_msg(NULL),
      first_non_payload_grf(0),
+     live_analysis(this), performance_analysis(this),
      need_all_constants_in_pull_buffer(false),
      no_spills(no_spills),
      shader_time_index(shader_time_index),
@@ -1880,13 +1783,12 @@ vec4_visitor::vec4_visitor(const struct brw_compiler *compiler,
 
    memset(this->output_num_components, 0, sizeof(this->output_num_components));
 
-   this->virtual_grf_start = NULL;
-   this->virtual_grf_end = NULL;
-   this->live_intervals = NULL;
-
    this->max_grf = devinfo->gen >= 7 ? GEN7_MRF_HACK_START : BRW_MAX_GRF;
 
    this->uniforms = 0;
+
+   this->nir_locals = NULL;
+   this->nir_ssa_values = NULL;
 }
 
 

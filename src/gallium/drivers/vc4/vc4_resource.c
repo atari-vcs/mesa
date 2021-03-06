@@ -23,16 +23,16 @@
  */
 
 #include "pipe/p_defines.h"
-#include "util/u_blit.h"
 #include "util/u_memory.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_surface.h"
 #include "util/u_transfer_helper.h"
 #include "util/u_upload_mgr.h"
+#include "util/u_drm.h"
 
-#include "drm_fourcc.h"
-#include "vc4_drm.h"
+#include "drm-uapi/drm_fourcc.h"
+#include "drm-uapi/vc4_drm.h"
 #include "vc4_screen.h"
 #include "vc4_context.h"
 #include "vc4_resource.h"
@@ -80,7 +80,7 @@ vc4_resource_transfer_unmap(struct pipe_context *pctx,
                 struct vc4_resource *rsc = vc4_resource(ptrans->resource);
                 struct vc4_resource_slice *slice = &rsc->slices[ptrans->level];
 
-                if (ptrans->usage & PIPE_TRANSFER_WRITE) {
+                if (ptrans->usage & PIPE_MAP_WRITE) {
                         vc4_store_tiled_image(rsc->bo->map + slice->offset +
                                               ptrans->box.z * rsc->cube_map_stride,
                                               slice->stride,
@@ -112,8 +112,8 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
         /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
          * being mapped.
          */
-        if ((usage & PIPE_TRANSFER_DISCARD_RANGE) &&
-            !(usage & PIPE_TRANSFER_UNSYNCHRONIZED) &&
+        if ((usage & PIPE_MAP_DISCARD_RANGE) &&
+            !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
             !(prsc->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
             prsc->last_level == 0 &&
             prsc->width0 == box->width &&
@@ -121,10 +121,10 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
             prsc->depth0 == box->depth &&
             prsc->array_size == 1 &&
             rsc->bo->private) {
-                usage |= PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE;
+                usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
         }
 
-        if (usage & PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE) {
+        if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
                 if (vc4_resource_bo_alloc(rsc)) {
                         /* If it might be bound as one of our vertex buffers,
                          * make sure we re-emit vertex buffer state.
@@ -137,18 +137,18 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
                          */
                         vc4_flush_jobs_reading_resource(vc4, prsc);
                 }
-        } else if (!(usage & PIPE_TRANSFER_UNSYNCHRONIZED)) {
+        } else if (!(usage & PIPE_MAP_UNSYNCHRONIZED)) {
                 /* If we're writing and the buffer is being used by the CL, we
                  * have to flush the CL first.  If we're only reading, we need
                  * to flush if the CL has written our buffer.
                  */
-                if (usage & PIPE_TRANSFER_WRITE)
+                if (usage & PIPE_MAP_WRITE)
                         vc4_flush_jobs_reading_resource(vc4, prsc);
                 else
                         vc4_flush_jobs_writing_resource(vc4, prsc);
         }
 
-        if (usage & PIPE_TRANSFER_WRITE) {
+        if (usage & PIPE_MAP_WRITE) {
                 rsc->writes++;
                 rsc->initialized_buffers = ~0;
         }
@@ -168,7 +168,7 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
         ptrans->usage = usage;
         ptrans->box = *box;
 
-        if (usage & PIPE_TRANSFER_UNSYNCHRONIZED)
+        if (usage & PIPE_MAP_UNSYNCHRONIZED)
                 buf = vc4_bo_map_unsynchronized(rsc->bo);
         else
                 buf = vc4_bo_map(rsc->bo);
@@ -184,7 +184,7 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
                 /* No direct mappings of tiled, since we need to manually
                  * tile/untile.
                  */
-                if (usage & PIPE_TRANSFER_MAP_DIRECTLY)
+                if (usage & PIPE_MAP_DIRECTLY)
                         return NULL;
 
                 if (format == PIPE_FORMAT_ETC1_RGB8) {
@@ -206,7 +206,7 @@ vc4_resource_transfer_map(struct pipe_context *pctx,
 
                 trans->map = malloc(ptrans->layer_stride * ptrans->box.depth);
 
-                if (usage & PIPE_TRANSFER_READ) {
+                if (usage & PIPE_MAP_READ) {
                         vc4_load_tiled_image(trans->map, ptrans->stride,
                                              buf + slice->offset +
                                              ptrans->box.z * rsc->cube_map_stride,
@@ -247,7 +247,7 @@ vc4_texture_subdata(struct pipe_context *pctx,
         /* For a direct mapping, we can just take the u_transfer path. */
         if (!rsc->tiled ||
             box->depth != 1 ||
-            (usage & PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE)) {
+            (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE)) {
                 return u_default_texture_subdata(pctx, prsc, level, usage, box,
                                                  data, stride, layer_stride);
         }
@@ -256,7 +256,7 @@ vc4_texture_subdata(struct pipe_context *pctx,
          * texture.
          */
         void *buf;
-        if (usage & PIPE_TRANSFER_UNSYNCHRONIZED)
+        if (usage & PIPE_MAP_UNSYNCHRONIZED)
                 buf = vc4_bo_map_unsynchronized(rsc->bo);
         else
                 buf = vc4_bo_map(rsc->bo);
@@ -283,7 +283,7 @@ vc4_resource_destroy(struct pipe_screen *pscreen,
         free(rsc);
 }
 
-static boolean
+static bool
 vc4_resource_get_handle(struct pipe_screen *pscreen,
                         struct pipe_context *pctx,
                         struct pipe_resource *prsc,
@@ -314,15 +314,17 @@ vc4_resource_get_handle(struct pipe_screen *pscreen,
                          * control node was used for pl111.
                          */
                         fprintf(stderr, "flink unsupported with pl111\n");
-                        return FALSE;
+                        return false;
                 }
 
                 return vc4_bo_flink(rsc->bo, &whandle->handle);
         case WINSYS_HANDLE_TYPE_KMS:
-                if (screen->ro && renderonly_get_handle(rsc->scanout, whandle))
-                        return TRUE;
+                if (screen->ro) {
+                        assert(rsc->scanout);
+                        return renderonly_get_handle(rsc->scanout, whandle);
+                }
                 whandle->handle = rsc->bo->handle;
-                return TRUE;
+                return true;
         case WINSYS_HANDLE_TYPE_FD:
                 /* FDs are cross-device, so we can export directly from vc4.
                  */
@@ -330,7 +332,7 @@ vc4_resource_get_handle(struct pipe_screen *pscreen,
                 return whandle->handle != -1;
         }
 
-        return FALSE;
+        return false;
 }
 
 static void
@@ -476,19 +478,6 @@ get_resource_texture_format(struct pipe_resource *prsc)
         return format;
 }
 
-static bool
-find_modifier(uint64_t needle, const uint64_t *haystack, int count)
-{
-        int i;
-
-        for (i = 0; i < count; i++) {
-                if (haystack[i] == needle)
-                        return true;
-        }
-
-        return false;
-}
-
 static struct pipe_resource *
 vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
                                    const struct pipe_resource *tmpl,
@@ -498,7 +487,7 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
         struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource_setup(pscreen, tmpl);
         struct pipe_resource *prsc = &rsc->base;
-        bool linear_ok = find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
+        bool linear_ok = drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
         /* Use a tiled layout if we can, for better 3D performance. */
         bool should_tile = true;
 
@@ -539,7 +528,7 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
                 linear_ok = true;
                 rsc->tiled = should_tile;
         } else if (should_tile &&
-                   find_modifier(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED,
+                   drm_find_modifier(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED,
                                  modifiers, count)) {
                 rsc->tiled = true;
         } else if (linear_ok) {
@@ -622,12 +611,10 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
 
         switch (whandle->type) {
         case WINSYS_HANDLE_TYPE_SHARED:
-                rsc->bo = vc4_bo_open_name(screen,
-                                           whandle->handle, whandle->stride);
+                rsc->bo = vc4_bo_open_name(screen, whandle->handle);
                 break;
         case WINSYS_HANDLE_TYPE_FD:
-                rsc->bo = vc4_bo_open_dmabuf(screen,
-                                             whandle->handle, whandle->stride);
+                rsc->bo = vc4_bo_open_dmabuf(screen, whandle->handle);
                 break;
         default:
                 fprintf(stderr,
@@ -1013,6 +1000,7 @@ void
 vc4_update_shadow_baselevel_texture(struct pipe_context *pctx,
                                     struct pipe_sampler_view *pview)
 {
+        struct vc4_context *vc4 = vc4_context(pctx);
         struct vc4_sampler_view *view = vc4_sampler_view(pview);
         struct vc4_resource *shadow = vc4_resource(view->texture);
         struct vc4_resource *orig = vc4_resource(pview->texture);
@@ -1101,7 +1089,7 @@ vc4_get_shadow_index_buffer(struct pipe_context *pctx,
                 src = pipe_buffer_map_range(pctx, &orig->base,
                                             offset,
                                             count * 4,
-                                            PIPE_TRANSFER_READ, &src_transfer);
+                                            PIPE_MAP_READ, &src_transfer);
         }
 
         for (int i = 0; i < count; i++) {

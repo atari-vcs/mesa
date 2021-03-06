@@ -36,12 +36,13 @@
 #include <sys/sysmacros.h>
 #include <dlfcn.h>
 #include <pthread.h>
-#include <i915_drm.h>
+#include "drm-uapi/i915_drm.h"
 
 #include "util/hash_table.h"
+#include "util/u_math.h"
 
-#define INTEL_LOG_TAG "INTEL-SANITIZE-GPU"
-#include "common/intel_log.h"
+#define MESA_LOG_TAG "INTEL-SANITIZE-GPU"
+#include "util/log.h"
 #include "common/gen_clflush.h"
 
 static int (*libc_open)(const char *pathname, int flags, mode_t mode);
@@ -67,13 +68,13 @@ struct refcnt_hash_table {
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MUTEX_LOCK() do {                        \
    if (unlikely(pthread_mutex_lock(&mutex))) {   \
-      intel_loge("mutex_lock failed");           \
+      mesa_loge("mutex_lock failed");           \
       abort();                                   \
    }                                             \
 } while (0)
 #define MUTEX_UNLOCK() do {                      \
    if (unlikely(pthread_mutex_unlock(&mutex))) { \
-      intel_loge("mutex_unlock failed");         \
+      mesa_loge("mutex_unlock failed");         \
       abort();                                   \
    }                                             \
 } while (0)
@@ -109,8 +110,7 @@ add_drm_fd(int fd)
 {
    struct refcnt_hash_table *r = malloc(sizeof(*r));
    r->refcnt = 1;
-   r->t = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
-                                  _mesa_key_pointer_equal);
+   r->t = _mesa_pointer_hash_table_create(NULL);
    _mesa_hash_table_insert(fds_to_bo_sizes, (void*)(uintptr_t)fd,
                            (void*)(uintptr_t)r);
 }
@@ -165,7 +165,7 @@ padding_is_good(int fd, uint32_t handle)
 {
    struct drm_i915_gem_mmap mmap_arg = {
       .handle = handle,
-      .offset = bo_size(fd, handle),
+      .offset = align64(bo_size(fd, handle), 4096),
       .size = PADDING_SIZE,
       .flags = 0,
    };
@@ -180,7 +180,7 @@ padding_is_good(int fd, uint32_t handle)
 
    ret = libc_ioctl(fd, DRM_IOCTL_I915_GEM_MMAP, &mmap_arg);
    if (ret != 0) {
-      intel_logd("Unable to map buffer %d for pad checking.", handle);
+      mesa_logd("Unable to map buffer %d for pad checking.", handle);
       return false;
    }
 
@@ -207,9 +207,11 @@ padding_is_good(int fd, uint32_t handle)
 static int
 create_with_padding(int fd, struct drm_i915_gem_create *create)
 {
-   create->size += PADDING_SIZE;
+   uint64_t original_size = create->size;
+
+   create->size = align64(original_size, 4096) + PADDING_SIZE;
    int ret = libc_ioctl(fd, DRM_IOCTL_I915_GEM_CREATE, create);
-   create->size -= PADDING_SIZE;
+   create->size = original_size;
 
    if (ret != 0)
       return ret;
@@ -217,14 +219,16 @@ create_with_padding(int fd, struct drm_i915_gem_create *create)
    uint8_t *noise_values;
    struct drm_i915_gem_mmap mmap_arg = {
       .handle = create->handle,
-      .offset = create->size,
+      .offset = align64(create->size, 4096),
       .size = PADDING_SIZE,
       .flags = 0,
    };
 
    ret = libc_ioctl(fd, DRM_IOCTL_I915_GEM_MMAP, &mmap_arg);
-   if (ret != 0)
+   if (ret != 0) {
+      mesa_logd("Unable to map buffer %d for pad creation.\n", create->handle);
       return 0;
+   }
 
    noise_values = (uint8_t*) (uintptr_t) mmap_arg.addr_ptr;
    fill_noise_buffer(noise_values, create->handle & 0xFF,
@@ -265,7 +269,7 @@ exec_and_check_padding(int fd, unsigned long request,
 
       if (!padding_is_good(fd, handle)) {
          detected_out_of_bounds_write = true;
-         intel_loge("Detected buffer out-of-bounds write in bo %d", handle);
+         mesa_loge("Detected buffer out-of-bounds write in bo %d", handle);
       }
    }
 
@@ -387,7 +391,7 @@ ioctl(int fd, unsigned long request, ...)
    va_end(args);
 
    if (_IOC_TYPE(request) == DRM_IOCTL_BASE && !is_drm_fd(fd) && is_i915(fd)) {
-      intel_loge("missed drm fd %d", fd);
+      mesa_loge("missed drm fd %d", fd);
       add_drm_fd(fd);
    }
 
@@ -421,8 +425,7 @@ ioctl(int fd, unsigned long request, ...)
 static void __attribute__ ((constructor))
 init(void)
 {
-   fds_to_bo_sizes = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
-                                             _mesa_key_pointer_equal);
+   fds_to_bo_sizes = _mesa_pointer_hash_table_create(NULL);
    libc_open = dlsym(RTLD_NEXT, "open");
    libc_close = dlsym(RTLD_NEXT, "close");
    libc_fcntl = dlsym(RTLD_NEXT, "fcntl");

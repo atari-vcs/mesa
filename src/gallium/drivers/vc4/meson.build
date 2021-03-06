@@ -96,7 +96,6 @@ if host_machine.cpu_family() == 'arm'
   vc4_c_args += '-DUSE_ARM_ASM'
 endif
 
-dep_simpenrose = dependency('simpenrose', required : false)
 if dep_simpenrose.found()
   vc4_c_args += '-DUSE_VC4_SIMULATOR'
 endif
@@ -106,11 +105,11 @@ libvc4 = static_library(
   [files_libvc4, v3d_xml_pack],
   include_directories : [
     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_broadcom,
-    inc_gallium_drivers, inc_drm_uapi,
+    inc_gallium_drivers,
   ],
   link_with: libvc4_neon,
-  c_args : [c_vis_args, vc4_c_args],
-  cpp_args : [cpp_vis_args],
+  c_args : [vc4_c_args],
+  gnu_symbol_visibility : 'hidden',
   dependencies : [dep_simpenrose, dep_libdrm, dep_valgrind, idep_nir_headers],
   build_by_default : false,
 )

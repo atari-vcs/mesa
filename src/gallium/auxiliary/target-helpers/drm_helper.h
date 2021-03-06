@@ -4,38 +4,67 @@
 #include <stdio.h>
 #include "target-helpers/inline_debug_helper.h"
 #include "target-helpers/drm_helper_public.h"
-#include "state_tracker/drm_driver.h"
-#include "util/xmlpool.h"
+#include "frontend/drm_driver.h"
+#include "util/driconf.h"
 
-static const struct drm_conf_ret throttle_ret = {
-   .type = DRM_CONF_INT,
-   .val.val_int = 2,
+/**
+ * Instantiate a drm_driver_descriptor struct.
+ */
+#define DEFINE_DRM_DRIVER_DESCRIPTOR(descriptor_name, driver, _driconf, _driconf_count, func) \
+const struct drm_driver_descriptor descriptor_name = {         \
+   .driver_name = #driver,                                     \
+   .driconf = _driconf,                                        \
+   .driconf_count = _driconf_count,                            \
+   .create_screen = func,                                      \
 };
 
-static const struct drm_conf_ret share_fd_ret = {
-   .type = DRM_CONF_BOOL,
-   .val.val_bool = true,
-};
+/* The static pipe loader refers to the *_driver_descriptor structs for all
+ * drivers, regardless of whether they are configured in this Mesa build, or
+ * whether they're included in the specific gallium target.  The target (dri,
+ * vdpau, etc.) will include this header with the #defines for the specific
+ * drivers it's including, and the disabled drivers will have a descriptor
+ * with a stub create function logging the failure.
+ *
+ * The dynamic pipe loader instead has target/pipeloader/pipe_*.c including
+ * this header in a pipe_*.so for each driver which will have one driver's
+ * GALLIUM_* defined.  We make a single driver_descriptor entrypoint that is
+ * dlsym()ed by the dynamic pipe loader.
+ */
 
-const struct drm_conf_ret *
-pipe_default_configuration_query(enum drm_conf conf)
-{
-   switch (conf) {
-   case DRM_CONF_THROTTLE:
-      return &throttle_ret;
-   case DRM_CONF_SHARE_FD:
-      return &share_fd_ret;
-   default:
-      break;
-   }
-   return NULL;
-}
+#ifdef PIPE_LOADER_DYNAMIC
+
+#define DRM_DRIVER_DESCRIPTOR(driver, driconf, driconf_count)           \
+   PUBLIC DEFINE_DRM_DRIVER_DESCRIPTOR(driver_descriptor, driver, driconf, driconf_count, pipe_##driver##_create_screen)
+
+#define DRM_DRIVER_DESCRIPTOR_STUB(driver)
+
+#define DRM_DRIVER_DESCRIPTOR_ALIAS(driver, alias, driconf, driconf_count)
+
+#else
+
+#define DRM_DRIVER_DESCRIPTOR(driver, driconf, driconf_count)                          \
+   DEFINE_DRM_DRIVER_DESCRIPTOR(driver##_driver_descriptor, driver, driconf, driconf_count, pipe_##driver##_create_screen)
+
+#define DRM_DRIVER_DESCRIPTOR_STUB(driver)                              \
+   static struct pipe_screen *                                          \
+   pipe_##driver##_create_screen(int fd, const struct pipe_screen_config *config) \
+   {                                                                    \
+      fprintf(stderr, #driver ": driver missing\n");                    \
+      return NULL;                                                      \
+   }                                                                    \
+   DRM_DRIVER_DESCRIPTOR(driver, NULL, 0)
+
+#define DRM_DRIVER_DESCRIPTOR_ALIAS(driver, alias, driconf, driconf_count) \
+   DEFINE_DRM_DRIVER_DESCRIPTOR(alias##_driver_descriptor, alias, driconf, \
+                                driconf_count, pipe_##driver##_create_screen)
+
+#endif
 
 #ifdef GALLIUM_I915
 #include "i915/drm/i915_drm_public.h"
 #include "i915/i915_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_i915_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct i915_winsys *iws;
@@ -48,22 +77,36 @@ pipe_i915_create_screen(int fd, const struct pipe_screen_config *config)
    screen = i915_screen_create(iws);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
-
+DRM_DRIVER_DESCRIPTOR(i915, NULL, 0)
 #else
+DRM_DRIVER_DESCRIPTOR_STUB(i915)
+#endif
 
-struct pipe_screen *
-pipe_i915_create_screen(int fd, const struct pipe_screen_config *config)
+#ifdef GALLIUM_IRIS
+#include "iris/drm/iris_drm_public.h"
+
+static struct pipe_screen *
+pipe_iris_create_screen(int fd, const struct pipe_screen_config *config)
 {
-   fprintf(stderr, "i915g: driver missing\n");
-   return NULL;
+   struct pipe_screen *screen;
+
+   screen = iris_drm_screen_create(fd, config);
+   return screen ? debug_screen_wrap(screen) : NULL;
 }
 
+const driOptionDescription iris_driconf[] = {
+      #include "iris/driinfo_iris.h"
+};
+DRM_DRIVER_DESCRIPTOR(iris, iris_driconf, ARRAY_SIZE(iris_driconf))
+
+#else
+DRM_DRIVER_DESCRIPTOR_STUB(iris)
 #endif
 
 #ifdef GALLIUM_NOUVEAU
 #include "nouveau/drm/nouveau_drm_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_nouveau_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
@@ -71,39 +114,37 @@ pipe_nouveau_create_screen(int fd, const struct pipe_screen_config *config)
    screen = nouveau_drm_screen_create(fd);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(nouveau, NULL, 0)
 
 #else
-
-struct pipe_screen *
-pipe_nouveau_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "nouveau: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(nouveau)
 #endif
 
-#ifdef GALLIUM_PL111
-#include "pl111/drm/pl111_drm_public.h"
+#if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
+const driOptionDescription v3d_driconf[] = {
+      #include "v3d/driinfo_v3d.h"
+};
+#endif
 
-struct pipe_screen *
-pipe_pl111_create_screen(int fd, const struct pipe_screen_config *config)
+#ifdef GALLIUM_KMSRO
+#include "kmsro/drm/kmsro_drm_public.h"
+
+static struct pipe_screen *
+pipe_kmsro_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = pl111_drm_screen_create(fd);
+   screen = kmsro_drm_screen_create(fd, config);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
+#if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
+DRM_DRIVER_DESCRIPTOR(kmsro, v3d_driconf, ARRAY_SIZE(v3d_driconf))
+#else
+DRM_DRIVER_DESCRIPTOR(kmsro, NULL, 0)
+#endif
 
 #else
-
-struct pipe_screen *
-pipe_pl111_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "pl111: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(kmsro)
 #endif
 
 #ifdef GALLIUM_R300
@@ -111,7 +152,7 @@ pipe_pl111_create_screen(int fd, const struct pipe_screen_config *config)
 #include "radeon/drm/radeon_drm_public.h"
 #include "r300/r300_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_r300_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct radeon_winsys *rw;
@@ -119,16 +160,10 @@ pipe_r300_create_screen(int fd, const struct pipe_screen_config *config)
    rw = radeon_drm_winsys_create(fd, config, r300_screen_create);
    return rw ? debug_screen_wrap(rw->screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(r300, NULL, 0)
 
 #else
-
-struct pipe_screen *
-pipe_r300_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "r300: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(r300)
 #endif
 
 #ifdef GALLIUM_R600
@@ -136,7 +171,7 @@ pipe_r300_create_screen(int fd, const struct pipe_screen_config *config)
 #include "radeon/drm/radeon_drm_public.h"
 #include "r600/r600_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_r600_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct radeon_winsys *rw;
@@ -144,78 +179,37 @@ pipe_r600_create_screen(int fd, const struct pipe_screen_config *config)
    rw = radeon_drm_winsys_create(fd, config, r600_screen_create);
    return rw ? debug_screen_wrap(rw->screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(r600, NULL, 0)
 
 #else
-
-struct pipe_screen *
-pipe_r600_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "r600: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(r600)
 #endif
 
 #ifdef GALLIUM_RADEONSI
-#include "radeon/radeon_winsys.h"
-#include "radeon/drm/radeon_drm_public.h"
-#include "amdgpu/drm/amdgpu_public.h"
 #include "radeonsi/si_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_radeonsi_create_screen(int fd, const struct pipe_screen_config *config)
 {
-   struct radeon_winsys *rw;
+   struct pipe_screen *screen = radeonsi_screen_create(fd, config);
 
-   /* First, try amdgpu. */
-   rw = amdgpu_winsys_create(fd, config, radeonsi_screen_create);
-
-   if (!rw)
-      rw = radeon_drm_winsys_create(fd, config, radeonsi_screen_create);
-
-   return rw ? debug_screen_wrap(rw->screen) : NULL;
+   return screen ? debug_screen_wrap(screen) : NULL;
 }
 
-const struct drm_conf_ret *
-pipe_radeonsi_configuration_query(enum drm_conf conf)
-{
-   static const struct drm_conf_ret xml_options_ret = {
-      .type = DRM_CONF_POINTER,
-      .val.val_pointer =
-#include "radeonsi/si_driinfo.h"
-   };
-
-   switch (conf) {
-   case DRM_CONF_XML_OPTIONS:
-      return &xml_options_ret;
-   default:
-      break;
-   }
-   return pipe_default_configuration_query(conf);
-}
+const driOptionDescription radeonsi_driconf[] = {
+      #include "radeonsi/driinfo_radeonsi.h"
+};
+DRM_DRIVER_DESCRIPTOR(radeonsi, radeonsi_driconf, ARRAY_SIZE(radeonsi_driconf))
 
 #else
-
-struct pipe_screen *
-pipe_radeonsi_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "radeonsi: driver missing\n");
-   return NULL;
-}
-
-const struct drm_conf_ret *
-pipe_radeonsi_configuration_query(enum drm_conf conf)
-{
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(radeonsi)
 #endif
 
 #ifdef GALLIUM_VMWGFX
 #include "svga/drm/svga_drm_public.h"
 #include "svga/svga_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_vmwgfx_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct svga_winsys_screen *sws;
@@ -228,161 +222,123 @@ pipe_vmwgfx_create_screen(int fd, const struct pipe_screen_config *config)
    screen = svga_screen_create(sws);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(vmwgfx, NULL, 0)
 
 #else
-
-struct pipe_screen *
-pipe_vmwgfx_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "svga: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(vmwgfx)
 #endif
 
 #ifdef GALLIUM_FREEDRENO
 #include "freedreno/drm/freedreno_drm_public.h"
 
-struct pipe_screen *
-pipe_freedreno_create_screen(int fd, const struct pipe_screen_config *config)
+static struct pipe_screen *
+pipe_msm_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = fd_drm_screen_create(fd);
+   screen = fd_drm_screen_create(fd, NULL);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
-
+DRM_DRIVER_DESCRIPTOR(msm, NULL, 0)
 #else
-
-struct pipe_screen *
-pipe_freedreno_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "freedreno: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(msm)
 #endif
+DRM_DRIVER_DESCRIPTOR_ALIAS(msm, kgsl, NULL, 0)
 
 #ifdef GALLIUM_VIRGL
 #include "virgl/drm/virgl_drm_public.h"
 #include "virgl/virgl_public.h"
 
-struct pipe_screen *
-pipe_virgl_create_screen(int fd, const struct pipe_screen_config *config)
+static struct pipe_screen *
+pipe_virtio_gpu_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = virgl_drm_screen_create(fd);
+   screen = virgl_drm_screen_create(fd, config);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
 
+const driOptionDescription virgl_driconf[] = {
+      #include "virgl/virgl_driinfo.h.in"
+};
+DRM_DRIVER_DESCRIPTOR(virtio_gpu, virgl_driconf, ARRAY_SIZE(virgl_driconf))
+
 #else
-
-struct pipe_screen *
-pipe_virgl_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "virgl: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(virtio_gpu)
 #endif
 
 #ifdef GALLIUM_VC4
 #include "vc4/drm/vc4_drm_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_vc4_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = vc4_drm_screen_create(fd);
+   screen = vc4_drm_screen_create(fd, config);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
-
+DRM_DRIVER_DESCRIPTOR(vc4, v3d_driconf, ARRAY_SIZE(v3d_driconf))
 #else
-
-struct pipe_screen *
-pipe_vc4_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "vc4: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(vc4)
 #endif
 
 #ifdef GALLIUM_V3D
 #include "v3d/drm/v3d_drm_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_v3d_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = v3d_drm_screen_create(fd);
+   screen = v3d_drm_screen_create(fd, config);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
 
+DRM_DRIVER_DESCRIPTOR(v3d, v3d_driconf, ARRAY_SIZE(v3d_driconf))
+
 #else
+DRM_DRIVER_DESCRIPTOR_STUB(v3d)
+#endif
 
-struct pipe_screen *
-pipe_v3d_create_screen(int fd, const struct pipe_screen_config *config)
+#ifdef GALLIUM_PANFROST
+#include "panfrost/drm/panfrost_drm_public.h"
+
+static struct pipe_screen *
+pipe_panfrost_create_screen(int fd, const struct pipe_screen_config *config)
 {
-   fprintf(stderr, "v3d: driver missing\n");
-   return NULL;
-}
+   struct pipe_screen *screen;
 
+   screen = panfrost_drm_screen_create(fd);
+   return screen ? debug_screen_wrap(screen) : NULL;
+}
+DRM_DRIVER_DESCRIPTOR(panfrost, NULL, 0)
+
+#else
+DRM_DRIVER_DESCRIPTOR_STUB(panfrost)
 #endif
 
 #ifdef GALLIUM_ETNAVIV
 #include "etnaviv/drm/etnaviv_drm_public.h"
 
-struct pipe_screen *
-pipe_etna_create_screen(int fd, const struct pipe_screen_config *config)
+static struct pipe_screen *
+pipe_etnaviv_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
    screen = etna_drm_screen_create(fd);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(etnaviv, NULL, 0)
 
 #else
-
-struct pipe_screen *
-pipe_etna_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "etnaviv: driver missing\n");
-   return NULL;
-}
-
-#endif
-
-#ifdef GALLIUM_IMX
-#include "imx/drm/imx_drm_public.h"
-
-struct pipe_screen *
-pipe_imx_drm_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   struct pipe_screen *screen;
-
-   screen = imx_drm_screen_create(fd);
-   return screen ? debug_screen_wrap(screen) : NULL;
-}
-
-#else
-
-struct pipe_screen *
-pipe_imx_drm_create_screen(int fd, const struct pipe_screen_config *config)
-{
-   fprintf(stderr, "imx-drm: driver missing\n");
-   return NULL;
-}
-
+DRM_DRIVER_DESCRIPTOR_STUB(etnaviv)
 #endif
 
 #ifdef GALLIUM_TEGRA
 #include "tegra/drm/tegra_drm_public.h"
 
-struct pipe_screen *
+static struct pipe_screen *
 pipe_tegra_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
@@ -391,16 +347,47 @@ pipe_tegra_create_screen(int fd, const struct pipe_screen_config *config)
 
    return screen ? debug_screen_wrap(screen) : NULL;
 }
+DRM_DRIVER_DESCRIPTOR(tegra, NULL, 0)
 
 #else
+DRM_DRIVER_DESCRIPTOR_STUB(tegra)
+#endif
 
-struct pipe_screen *
-pipe_tegra_create_screen(int fd, const struct pipe_screen_config *config)
+#ifdef GALLIUM_LIMA
+#include "lima/drm/lima_drm_public.h"
+
+static struct pipe_screen *
+pipe_lima_create_screen(int fd, const struct pipe_screen_config *config)
 {
-   fprintf(stderr, "tegra: driver missing\n");
-   return NULL;
+   struct pipe_screen *screen;
+
+   screen = lima_drm_screen_create(fd);
+   return screen ? debug_screen_wrap(screen) : NULL;
+}
+DRM_DRIVER_DESCRIPTOR(lima, NULL, 0)
+
+#else
+DRM_DRIVER_DESCRIPTOR_STUB(lima)
+#endif
+
+#ifdef GALLIUM_ZINK
+#include "zink/zink_public.h"
+
+static struct pipe_screen *
+pipe_zink_create_screen(int fd, const struct pipe_screen_config *config)
+{
+   struct pipe_screen *screen;
+   screen = zink_drm_create_screen(fd, config);
+   return screen ? debug_screen_wrap(screen) : NULL;
 }
 
+const driOptionDescription zink_driconf[] = {
+      #include "zink/driinfo_zink.h"
+};
+DRM_DRIVER_DESCRIPTOR(zink, zink_driconf, ARRAY_SIZE(zink_driconf))
+
+#else
+DRM_DRIVER_DESCRIPTOR_STUB(zink)
 #endif
 
 #endif /* DRM_HELPER_H */

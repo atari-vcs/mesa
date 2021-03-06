@@ -41,7 +41,7 @@ nv30_fragprog_upload(struct nv30_context *nv30)
    if (unlikely(!fp->buffer))
       fp->buffer = pipe_buffer_create(pipe->screen, 0, 0, fp->insn_len * 4);
 
-#ifndef PIPE_ARCH_BIG_ENDIAN
+#if !UTIL_ARCH_BIG_ENDIAN
    pipe_buffer_write(pipe, fp->buffer, 0, fp->insn_len * 4, fp->insn);
 #else
    {
@@ -50,7 +50,7 @@ nv30_fragprog_upload(struct nv30_context *nv30)
       int i;
 
       map = pipe_buffer_map(pipe, fp->buffer,
-                            PIPE_TRANSFER_WRITE | PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE,
+                            PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
                             &transfer);
       for (i = 0; i < fp->insn_len; i++)
          *map++ = (fp->insn[i] >> 16) | (fp->insn[i] << 16);
@@ -171,7 +171,7 @@ nv30_fp_state_bind(struct pipe_context *pipe, void *hwcso)
     * code
     */
    if (fp != nv30->state.fragprog)
-      PUSH_RESET(nv30->base.pushbuf, BUFCTX_FRAGPROG);
+      nouveau_bufctx_reset(nv30->bufctx, BUFCTX_FRAGPROG);
 
    nv30->fragprog.program = fp;
    nv30->dirty |= NV30_NEW_FRAGPROG;

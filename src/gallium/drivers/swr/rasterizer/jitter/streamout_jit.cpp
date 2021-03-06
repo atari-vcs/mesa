@@ -28,7 +28,7 @@
  *
  ******************************************************************************/
 #include "jit_pch.hpp"
-#include "builder.h"
+#include "builder_gfx_mem.h"
 #include "jit_api.h"
 #include "streamout_jit.h"
 #include "gen_state_llvm.h"
@@ -40,9 +40,9 @@ using namespace SwrJit;
 //////////////////////////////////////////////////////////////////////////
 /// Interface to Jitting a fetch shader
 //////////////////////////////////////////////////////////////////////////
-struct StreamOutJit : public Builder
+struct StreamOutJit : public BuilderGfxMem
 {
-    StreamOutJit(JitManager* pJitMgr) : Builder(pJitMgr){};
+    StreamOutJit(JitManager* pJitMgr) : BuilderGfxMem(pJitMgr){};
 
     // returns pointer to SWR_STREAMOUT_BUFFER
     Value* getSOBuffer(Value* pSoCtx, uint32_t buffer)
@@ -91,7 +91,7 @@ struct StreamOutJit : public Builder
     Value* PackMask(uint32_t bitmask)
     {
         std::vector<Constant*> indices(4, C(0));
-        DWORD                  index;
+        unsigned long          index;
         uint32_t               elem = 0;
         while (_BitScanForward(&index, bitmask))
         {
@@ -138,7 +138,7 @@ struct StreamOutJit : public Builder
             Value* pAttrib = GEP(pStream, C(4 * decl.attribSlot));
 
             // load 4 components from stream
-            Type* simd4Ty    = VectorType::get(IRB()->getFloatTy(), 4);
+            Type* simd4Ty    = getVectorType(IRB()->getFloatTy(), 4);
             Type* simd4PtrTy = PointerType::get(simd4Ty, 0);
             pAttrib          = BITCAST(pAttrib, simd4PtrTy);
             Value* vattrib   = LOAD(pAttrib);
@@ -155,7 +155,7 @@ struct StreamOutJit : public Builder
 
             // cast mask to <4xi1>
             Value* mask = ToMask(packedMask);
-            MASKED_STORE(src, pOut, 4, mask);
+            MASKED_STORE(src, pOut, 4, mask, PointerType::get(simd4Ty, 0), MEM_CLIENT::GFX_MEM_CLIENT_STREAMOUT);
         }
 
         // increment SO buffer
@@ -223,7 +223,7 @@ struct StreamOutJit : public Builder
             Value* pBuf              = getSOBuffer(pSoCtx, b);
             Value* pData             = LOAD(pBuf, {0, SWR_STREAMOUT_BUFFER_pBuffer});
             Value* streamOffset      = LOAD(pBuf, {0, SWR_STREAMOUT_BUFFER_streamOffset});
-            pOutBuffer[b]            = GEP(pData, streamOffset);
+            pOutBuffer[b] = GEP(pData, streamOffset, PointerType::get(IRB()->getInt32Ty(), 0));
             pOutBufferStartVertex[b] = pOutBuffer[b];
 
             outBufferPitch[b] = LOAD(pBuf, {0, SWR_STREAMOUT_BUFFER_pitch});
@@ -263,10 +263,9 @@ struct StreamOutJit : public Builder
                                  std::ios_base::in | std::ios_base::out | std::ios_base::ate);
         fnName << ComputeCRC(0, &state, sizeof(state));
 
-        // SO function signature
-        // typedef void(__cdecl *PFN_SO_FUNC)(SWR_STREAMOUT_CONTEXT*)
-
         std::vector<Type*> args{
+            mInt8PtrTy,
+            mInt8PtrTy,
             PointerType::get(Gen_SWR_STREAMOUT_CONTEXT(JM()), 0), // SWR_STREAMOUT_CONTEXT*
         };
 
@@ -284,6 +283,15 @@ struct StreamOutJit : public Builder
 
         // arguments
         auto   argitr = soFunc->arg_begin();
+
+        Value* privateContext = &*argitr++;
+        privateContext->setName("privateContext");
+        SetPrivateContext(privateContext);
+
+        mpWorkerData = &*argitr;
+        ++argitr;
+        mpWorkerData->setName("pWorkerData");
+
         Value* pSoCtx = &*argitr++;
         pSoCtx->setName("pSoCtx");
 
@@ -306,7 +314,9 @@ struct StreamOutJit : public Builder
         passes.add(createCFGSimplificationPass());
         passes.add(createEarlyCSEPass());
         passes.add(createInstructionCombiningPass());
+#if LLVM_VERSION_MAJOR <= 11
         passes.add(createConstantPropagationPass());
+#endif
         passes.add(createSCCPPass());
         passes.add(createAggressiveDCEPass());
 

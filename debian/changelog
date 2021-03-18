@@ -1,3 +1,16 @@
+mesa (20.3.4-1apertis1) apertis; urgency=medium
+
+  * Sync updates from Debian Bullseye.
+  * Remaining Apertis specific chanages
+    - Drop the separation of the packages, instead make sure libelf isn’t used.
+    - Don’t build:
+      + libd3dadapter9-mesa
+      + libd3dadapter9-mesa-dev
+      + mesa-opencl-icd.
+    - Only build mesa-vulkan-drivers on amd64.
+
+ -- Ritesh Raj Sarraf <ritesh.sarraf@collabora.com>  Thu, 18 Mar 2021 13:39:12 +0530
+
 mesa (20.3.4-1) unstable; urgency=medium
 
   [ Keith Packard ]

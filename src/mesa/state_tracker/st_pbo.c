@@ -29,6 +29,7 @@
  */
 
 #include "state_tracker/st_context.h"
+#include "state_tracker/st_nir.h"
 #include "state_tracker/st_pbo.h"
 #include "state_tracker/st_cb_bufferobjects.h"
 
@@ -37,9 +38,11 @@
 #include "pipe/p_screen.h"
 #include "cso_cache/cso_context.h"
 #include "tgsi/tgsi_ureg.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
+
+#include "compiler/nir/nir_builder.h"
 
 /* Conversion to apply in the fragment shader. */
 enum st_pbo_conversion {
@@ -216,7 +219,7 @@ st_pbo_draw(struct st_context *st, const struct st_pbo_addresses *addr,
    /* Upload vertices */
    {
       struct pipe_vertex_buffer vbo = {0};
-      struct pipe_vertex_element velem;
+      struct cso_velems_state velem;
 
       float x0 = (float) addr->xoffset / surface_width * 2.0f - 1.0f;
       float y0 = (float) addr->yoffset / surface_height * 2.0f - 1.0f;
@@ -243,14 +246,15 @@ st_pbo_draw(struct st_context *st, const struct st_pbo_addresses *addr,
 
       u_upload_unmap(st->pipe->stream_uploader);
 
-      velem.src_offset = 0;
-      velem.instance_divisor = 0;
-      velem.vertex_buffer_index = 0;
-      velem.src_format = PIPE_FORMAT_R32G32_FLOAT;
+      velem.count = 1;
+      velem.velems[0].src_offset = 0;
+      velem.velems[0].instance_divisor = 0;
+      velem.velems[0].vertex_buffer_index = 0;
+      velem.velems[0].src_format = PIPE_FORMAT_R32G32_FLOAT;
 
-      cso_set_vertex_elements(cso, 1, &velem);
+      cso_set_vertex_elements(cso, &velem);
 
-      cso_set_vertex_buffers(cso, velem.vertex_buffer_index, 1, &vbo);
+      cso_set_vertex_buffers(cso, 0, 1, &vbo);
 
       pipe_resource_reference(&vbo.buffer.resource, NULL);
    }
@@ -288,45 +292,48 @@ st_pbo_draw(struct st_context *st, const struct st_pbo_addresses *addr,
 void *
 st_pbo_create_vs(struct st_context *st)
 {
-   struct ureg_program *ureg;
-   struct ureg_src in_pos;
-   struct ureg_src in_instanceid;
-   struct ureg_dst out_pos;
-   struct ureg_dst out_layer;
+   const struct glsl_type *vec4 = glsl_vec4_type();
+   const nir_shader_compiler_options *options =
+      st_get_nir_compiler_options(st, MESA_SHADER_VERTEX);
 
-   ureg = ureg_create(PIPE_SHADER_VERTEX);
-   if (!ureg)
-      return NULL;
+   nir_builder b;
+   nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_VERTEX, options);
 
-   in_pos = ureg_DECL_vs_input(ureg, TGSI_SEMANTIC_POSITION);
+   nir_variable *in_pos = nir_variable_create(b.shader, nir_var_shader_in,
+                                              vec4, "in_pos");
+   in_pos->data.location = VERT_ATTRIB_POS;
 
-   out_pos = ureg_DECL_output(ureg, TGSI_SEMANTIC_POSITION, 0);
+   nir_variable *out_pos = nir_variable_create(b.shader, nir_var_shader_out,
+                                               vec4, "out_pos");
+   out_pos->data.location = VARYING_SLOT_POS;
+   out_pos->data.interpolation = INTERP_MODE_NONE;
 
-   if (st->pbo.layers) {
-      in_instanceid = ureg_DECL_system_value(ureg, TGSI_SEMANTIC_INSTANCEID, 0);
-
-      if (!st->pbo.use_gs)
-         out_layer = ureg_DECL_output(ureg, TGSI_SEMANTIC_LAYER, 0);
-   }
-
-   /* out_pos = in_pos */
-   ureg_MOV(ureg, out_pos, in_pos);
+   nir_copy_var(&b, out_pos, in_pos);
 
    if (st->pbo.layers) {
+      nir_variable *instance_id = nir_variable_create(b.shader,
+                                                      nir_var_system_value,
+                                                      glsl_int_type(),
+                                                      "instance_id");
+      instance_id->data.location = SYSTEM_VALUE_INSTANCE_ID;
+
       if (st->pbo.use_gs) {
-         /* out_pos.z = i2f(gl_InstanceID) */
-         ureg_I2F(ureg, ureg_writemask(out_pos, TGSI_WRITEMASK_Z),
-                        ureg_scalar(in_instanceid, TGSI_SWIZZLE_X));
+         unsigned swiz_x[4] = {0, 0, 0, 0};
+         nir_store_var(&b, out_pos,
+                       nir_swizzle(&b, nir_i2f32(&b, nir_load_var(&b, instance_id)), swiz_x, 4),
+                       (1 << 2));
       } else {
-         /* out_layer = gl_InstanceID */
-         ureg_MOV(ureg, ureg_writemask(out_layer, TGSI_WRITEMASK_X),
-                        ureg_scalar(in_instanceid, TGSI_SWIZZLE_X));
+         nir_variable *out_layer = nir_variable_create(b.shader,
+                                                     nir_var_shader_out,
+                                                     glsl_int_type(),
+                                                     "out_layer");
+         out_layer->data.location = VARYING_SLOT_LAYER;
+         out_layer->data.interpolation = INTERP_MODE_NONE;
+         nir_copy_var(&b, out_layer, instance_id);
       }
    }
 
-   ureg_END(ureg);
-
-   return ureg_create_shader_and_destroy(ureg, st->pipe);
+   return st_nir_finish_builtin_shader(st, b.shader, "st/pbo VS");
 }
 
 void *
@@ -373,166 +380,176 @@ st_pbo_create_gs(struct st_context *st)
    return ureg_create_shader_and_destroy(ureg, st->pipe);
 }
 
-static void
-build_conversion(struct ureg_program *ureg, const struct ureg_dst *temp,
-                 enum st_pbo_conversion conversion)
+static const struct glsl_type *
+sampler_type_for_target(enum pipe_texture_target target)
 {
-   switch (conversion) {
-   case ST_PBO_CONVERT_SINT_TO_UINT:
-      ureg_IMAX(ureg, *temp, ureg_src(*temp), ureg_imm1i(ureg, 0));
-      break;
-   case ST_PBO_CONVERT_UINT_TO_SINT:
-      ureg_UMIN(ureg, *temp, ureg_src(*temp), ureg_imm1u(ureg, (1u << 31) - 1));
-      break;
-   default:
-      /* no-op */
-      break;
-   }
+   bool is_array = target >= PIPE_TEXTURE_1D_ARRAY;
+   static const enum glsl_sampler_dim dim[] = {
+      [PIPE_BUFFER]             = GLSL_SAMPLER_DIM_BUF,
+      [PIPE_TEXTURE_1D]         = GLSL_SAMPLER_DIM_1D,
+      [PIPE_TEXTURE_2D]         = GLSL_SAMPLER_DIM_2D,
+      [PIPE_TEXTURE_3D]         = GLSL_SAMPLER_DIM_3D,
+      [PIPE_TEXTURE_CUBE]       = GLSL_SAMPLER_DIM_CUBE,
+      [PIPE_TEXTURE_RECT]       = GLSL_SAMPLER_DIM_RECT,
+      [PIPE_TEXTURE_1D_ARRAY]   = GLSL_SAMPLER_DIM_1D,
+      [PIPE_TEXTURE_2D_ARRAY]   = GLSL_SAMPLER_DIM_2D,
+      [PIPE_TEXTURE_CUBE_ARRAY] = GLSL_SAMPLER_DIM_CUBE,
+   };
+
+   return glsl_sampler_type(dim[target], false, is_array, GLSL_TYPE_FLOAT);
 }
 
+
 static void *
-create_fs(struct st_context *st, bool download, enum pipe_texture_target target,
-          enum st_pbo_conversion conversion)
+create_fs(struct st_context *st, bool download,
+          enum pipe_texture_target target,
+          enum st_pbo_conversion conversion,
+          bool need_layer)
 {
-   struct pipe_context *pipe = st->pipe;
-   struct pipe_screen *screen = pipe->screen;
-   struct ureg_program *ureg;
-   bool have_layer;
-   struct ureg_dst out;
-   struct ureg_src sampler;
-   struct ureg_src pos;
-   struct ureg_src layer;
-   struct ureg_src const0;
-   struct ureg_src const1;
-   struct ureg_dst temp0;
+   struct pipe_screen *screen = st->pipe->screen;
+   struct nir_builder b;
+   const nir_shader_compiler_options *options =
+      st_get_nir_compiler_options(st, MESA_SHADER_FRAGMENT);
+   bool pos_is_sysval =
+      screen->get_param(screen, PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL);
 
-   have_layer =
-      st->pbo.layers &&
-      (!download || target == PIPE_TEXTURE_1D_ARRAY
-                 || target == PIPE_TEXTURE_2D_ARRAY
-                 || target == PIPE_TEXTURE_3D
-                 || target == PIPE_TEXTURE_CUBE
-                 || target == PIPE_TEXTURE_CUBE_ARRAY);
+   nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_FRAGMENT, options);
 
-   ureg = ureg_create(PIPE_SHADER_FRAGMENT);
-   if (!ureg)
-      return NULL;
+   nir_ssa_def *zero = nir_imm_int(&b, 0);
 
-   if (!download) {
-      out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
-   } else {
-      struct ureg_src image;
+   /* param = [ -xoffset + skip_pixels, -yoffset, stride, image_height ] */
+   nir_variable *param_var =
+      nir_variable_create(b.shader, nir_var_uniform, glsl_vec4_type(), "param");
+   b.shader->num_uniforms += 4;
+   nir_ssa_def *param = nir_load_var(&b, param_var);
 
-      /* writeonly images do not require an explicitly given format. */
-      image = ureg_DECL_image(ureg, 0, TGSI_TEXTURE_BUFFER, PIPE_FORMAT_NONE,
-                                    true, false);
-      out = ureg_dst(image);
+   nir_variable *fragcoord =
+      nir_variable_create(b.shader, pos_is_sysval ? nir_var_system_value :
+                          nir_var_shader_in, glsl_vec4_type(), "gl_FragCoord");
+   fragcoord->data.location = pos_is_sysval ? SYSTEM_VALUE_FRAG_COORD
+                                            : VARYING_SLOT_POS;
+   nir_ssa_def *coord = nir_load_var(&b, fragcoord);
+
+   nir_ssa_def *layer = NULL;
+   if (st->pbo.layers && (!download || target == PIPE_TEXTURE_1D_ARRAY ||
+                                       target == PIPE_TEXTURE_2D_ARRAY ||
+                                       target == PIPE_TEXTURE_3D ||
+                                       target == PIPE_TEXTURE_CUBE ||
+                                       target == PIPE_TEXTURE_CUBE_ARRAY)) {
+      if (need_layer) {
+         nir_variable *var = nir_variable_create(b.shader, nir_var_shader_in,
+                                                glsl_int_type(), "gl_Layer");
+         var->data.location = VARYING_SLOT_LAYER;
+         var->data.interpolation = INTERP_MODE_FLAT;
+         layer = nir_load_var(&b, var);
+      }
+      else {
+         layer = zero;
+      }
    }
 
-   sampler = ureg_DECL_sampler(ureg, 0);
-   if (screen->get_param(screen, PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL)) {
-      pos = ureg_DECL_system_value(ureg, TGSI_SEMANTIC_POSITION, 0);
-   } else {
-      pos = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_POSITION, 0,
-                               TGSI_INTERPOLATE_LINEAR);
-   }
-   if (have_layer) {
-      layer = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_LAYER, 0,
-                                       TGSI_INTERPOLATE_CONSTANT);
-   }
-   const0  = ureg_DECL_constant(ureg, 0);
-   const1  = ureg_DECL_constant(ureg, 1);
-   temp0   = ureg_DECL_temporary(ureg);
+   /* offset_pos = param.xy + f2i(coord.xy) */
+   nir_ssa_def *offset_pos =
+      nir_iadd(&b, nir_channels(&b, param, TGSI_WRITEMASK_XY),
+               nir_f2i32(&b, nir_channels(&b, coord, TGSI_WRITEMASK_XY)));
 
-   /* Note: const0 = [ -xoffset + skip_pixels, -yoffset, stride, image_height ] */
-
-   /* temp0.xy = f2i(temp0.xy) */
-   ureg_F2I(ureg, ureg_writemask(temp0, TGSI_WRITEMASK_XY),
-                  ureg_swizzle(pos,
-                               TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
-                               TGSI_SWIZZLE_Y, TGSI_SWIZZLE_Y));
-
-   /* temp0.xy = temp0.xy + const0.xy */
-   ureg_UADD(ureg, ureg_writemask(temp0, TGSI_WRITEMASK_XY),
-                   ureg_swizzle(ureg_src(temp0),
-                                TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
-                                TGSI_SWIZZLE_Y, TGSI_SWIZZLE_Y),
-                   ureg_swizzle(const0,
-                                TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
-                                TGSI_SWIZZLE_Y, TGSI_SWIZZLE_Y));
-
-   /* temp0.x = const0.z * temp0.y + temp0.x */
-   ureg_UMAD(ureg, ureg_writemask(temp0, TGSI_WRITEMASK_X),
-                   ureg_scalar(const0, TGSI_SWIZZLE_Z),
-                   ureg_scalar(ureg_src(temp0), TGSI_SWIZZLE_Y),
-                   ureg_scalar(ureg_src(temp0), TGSI_SWIZZLE_X));
-
-   if (have_layer) {
-      /* temp0.x = const0.w * layer + temp0.x */
-      ureg_UMAD(ureg, ureg_writemask(temp0, TGSI_WRITEMASK_X),
-                      ureg_scalar(const0, TGSI_SWIZZLE_W),
-                      ureg_scalar(layer, TGSI_SWIZZLE_X),
-                      ureg_scalar(ureg_src(temp0), TGSI_SWIZZLE_X));
+   /* addr = offset_pos.x + offset_pos.y * stride */
+   nir_ssa_def *pbo_addr =
+      nir_iadd(&b, nir_channel(&b, offset_pos, 0),
+               nir_imul(&b, nir_channel(&b, offset_pos, 1),
+                        nir_channel(&b, param, 2)));
+   if (layer) {
+      /* pbo_addr += image_height * layer */
+      pbo_addr = nir_iadd(&b, pbo_addr,
+                          nir_imul(&b, layer, nir_channel(&b, param, 3)));
    }
 
-   /* temp0.w = 0 */
-   ureg_MOV(ureg, ureg_writemask(temp0, TGSI_WRITEMASK_W), ureg_imm1u(ureg, 0));
-
+   nir_ssa_def *texcoord;
    if (download) {
-      struct ureg_dst temp1;
-      struct ureg_src op[2];
+      texcoord = nir_f2i32(&b, nir_channels(&b, coord, TGSI_WRITEMASK_XY));
 
-      temp1 = ureg_DECL_temporary(ureg);
-
-      /* temp1.xy = pos.xy */
-      ureg_F2I(ureg, ureg_writemask(temp1, TGSI_WRITEMASK_XY), pos);
-
-      /* temp1.zw = 0 */
-      ureg_MOV(ureg, ureg_writemask(temp1, TGSI_WRITEMASK_ZW), ureg_imm1u(ureg, 0));
-
-      if (have_layer) {
-         struct ureg_dst temp1_layer =
-            ureg_writemask(temp1, target == PIPE_TEXTURE_1D_ARRAY ? TGSI_WRITEMASK_Y
-                                                                  : TGSI_WRITEMASK_Z);
-
-         /* temp1.y/z = layer */
-         ureg_MOV(ureg, temp1_layer, ureg_scalar(layer, TGSI_SWIZZLE_X));
+      if (layer) {
+         nir_ssa_def *src_layer = layer;
 
          if (target == PIPE_TEXTURE_3D) {
-            /* temp1.z += layer_offset */
-            ureg_UADD(ureg, temp1_layer,
-                            ureg_scalar(ureg_src(temp1), TGSI_SWIZZLE_Z),
-                            ureg_scalar(const1, TGSI_SWIZZLE_X));
+            nir_variable *layer_offset_var =
+               nir_variable_create(b.shader, nir_var_uniform,
+                                   glsl_int_type(), "layer_offset");
+            b.shader->num_uniforms += 1;
+            layer_offset_var->data.driver_location = 4;
+            nir_ssa_def *layer_offset = nir_load_var(&b, layer_offset_var);
+
+            src_layer = nir_iadd(&b, layer, layer_offset);
          }
+
+         texcoord = nir_vec3(&b, nir_channel(&b, texcoord, 0),
+                                 nir_channel(&b, texcoord, 1),
+                                 src_layer);
       }
-
-      /* temp1 = txf(sampler, temp1) */
-      ureg_TXF(ureg, temp1, util_pipe_tex_to_tgsi_tex(target, 1),
-                     ureg_src(temp1), sampler);
-
-      build_conversion(ureg, &temp1, conversion);
-
-      /* store(out, temp0, temp1) */
-      op[0] = ureg_src(temp0);
-      op[1] = ureg_src(temp1);
-      ureg_memory_insn(ureg, TGSI_OPCODE_STORE, &out, 1, op, 2, 0,
-                             TGSI_TEXTURE_BUFFER, PIPE_FORMAT_NONE);
-
-      ureg_release_temporary(ureg, temp1);
    } else {
-      /* out = txf(sampler, temp0.x) */
-      ureg_TXF(ureg, temp0, TGSI_TEXTURE_BUFFER, ureg_src(temp0), sampler);
-
-      build_conversion(ureg, &temp0, conversion);
-
-      ureg_MOV(ureg, out, ureg_src(temp0));
+      texcoord = pbo_addr;
    }
 
-   ureg_release_temporary(ureg, temp0);
+   nir_variable *tex_var =
+      nir_variable_create(b.shader, nir_var_uniform,
+                          sampler_type_for_target(target), "tex");
+   tex_var->data.explicit_binding = true;
+   tex_var->data.binding = 0;
 
-   ureg_END(ureg);
+   nir_deref_instr *tex_deref = nir_build_deref_var(&b, tex_var);
 
-   return ureg_create_shader_and_destroy(ureg, pipe);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = glsl_get_sampler_dim(tex_var->type);
+   tex->coord_components =
+      glsl_get_sampler_coordinate_components(tex_var->type);
+   tex->dest_type = nir_type_float;
+   tex->src[0].src_type = nir_tex_src_texture_deref;
+   tex->src[0].src = nir_src_for_ssa(&tex_deref->dest.ssa);
+   tex->src[1].src_type = nir_tex_src_sampler_deref;
+   tex->src[1].src = nir_src_for_ssa(&tex_deref->dest.ssa);
+   tex->src[2].src_type = nir_tex_src_coord;
+   tex->src[2].src = nir_src_for_ssa(texcoord);
+   nir_ssa_dest_init(&tex->instr, &tex->dest, 4, 32, NULL);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_ssa_def *result = &tex->dest.ssa;
+
+   if (conversion == ST_PBO_CONVERT_SINT_TO_UINT)
+      result = nir_imax(&b, result, zero);
+   else if (conversion == ST_PBO_CONVERT_UINT_TO_SINT)
+      result = nir_umin(&b, result, nir_imm_int(&b, (1u << 31) - 1));
+
+   if (download) {
+      nir_variable *img_var =
+         nir_variable_create(b.shader, nir_var_uniform,
+                             glsl_image_type(GLSL_SAMPLER_DIM_BUF, false,
+                                             GLSL_TYPE_FLOAT), "img");
+      img_var->data.access = ACCESS_NON_READABLE;
+      img_var->data.explicit_binding = true;
+      img_var->data.binding = 0;
+      nir_deref_instr *img_deref = nir_build_deref_var(&b, img_var);
+      nir_intrinsic_instr *intrin =
+         nir_intrinsic_instr_create(b.shader, nir_intrinsic_image_deref_store);
+      intrin->src[0] = nir_src_for_ssa(&img_deref->dest.ssa);
+      intrin->src[1] =
+         nir_src_for_ssa(nir_vec4(&b, pbo_addr, zero, zero, zero));
+      intrin->src[2] = nir_src_for_ssa(zero);
+      intrin->src[3] = nir_src_for_ssa(result);
+      intrin->src[4] = nir_src_for_ssa(nir_imm_int(&b, 0));
+      intrin->num_components = 4;
+      nir_builder_instr_insert(&b, &intrin->instr);
+   } else {
+      nir_variable *color =
+         nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(),
+                             "gl_FragColor");
+      color->data.location = FRAG_RESULT_COLOR;
+
+      nir_store_var(&b, color, result, TGSI_WRITEMASK_XYZW);
+   }
+
+   return st_nir_finish_builtin_shader(st, b.shader, download ?
+                                       "st/pbo download FS" :
+                                       "st/pbo upload FS");
 }
 
 static enum st_pbo_conversion
@@ -552,32 +569,34 @@ get_pbo_conversion(enum pipe_format src_format, enum pipe_format dst_format)
 void *
 st_pbo_get_upload_fs(struct st_context *st,
                      enum pipe_format src_format,
-                     enum pipe_format dst_format)
+                     enum pipe_format dst_format,
+                     bool need_layer)
 {
    STATIC_ASSERT(ARRAY_SIZE(st->pbo.upload_fs) == ST_NUM_PBO_CONVERSIONS);
 
    enum st_pbo_conversion conversion = get_pbo_conversion(src_format, dst_format);
 
-   if (!st->pbo.upload_fs[conversion])
-      st->pbo.upload_fs[conversion] = create_fs(st, false, 0, conversion);
+   if (!st->pbo.upload_fs[conversion][need_layer])
+      st->pbo.upload_fs[conversion][need_layer] = create_fs(st, false, 0, conversion, need_layer);
 
-   return st->pbo.upload_fs[conversion];
+   return st->pbo.upload_fs[conversion][need_layer];
 }
 
 void *
 st_pbo_get_download_fs(struct st_context *st, enum pipe_texture_target target,
                        enum pipe_format src_format,
-                       enum pipe_format dst_format)
+                       enum pipe_format dst_format,
+                       bool need_layer)
 {
    STATIC_ASSERT(ARRAY_SIZE(st->pbo.download_fs) == ST_NUM_PBO_CONVERSIONS);
    assert(target < PIPE_MAX_TEXTURE_TYPES);
 
    enum st_pbo_conversion conversion = get_pbo_conversion(src_format, dst_format);
 
-   if (!st->pbo.download_fs[conversion][target])
-      st->pbo.download_fs[conversion][target] = create_fs(st, true, target, conversion);
+   if (!st->pbo.download_fs[conversion][target][need_layer])
+      st->pbo.download_fs[conversion][target][need_layer] = create_fs(st, true, target, conversion, need_layer);
 
-   return st->pbo.download_fs[conversion][target];
+   return st->pbo.download_fs[conversion][target][need_layer];
 }
 
 void
@@ -627,28 +646,32 @@ st_destroy_pbo_helpers(struct st_context *st)
    unsigned i;
 
    for (i = 0; i < ARRAY_SIZE(st->pbo.upload_fs); ++i) {
-      if (st->pbo.upload_fs[i]) {
-         cso_delete_fragment_shader(st->cso_context, st->pbo.upload_fs[i]);
-         st->pbo.upload_fs[i] = NULL;
+      for (unsigned j = 0; j < ARRAY_SIZE(st->pbo.upload_fs[0]); j++) {
+         if (st->pbo.upload_fs[i][j]) {
+            st->pipe->delete_fs_state(st->pipe, st->pbo.upload_fs[i][j]);
+            st->pbo.upload_fs[i][j] = NULL;
+         }
       }
    }
 
    for (i = 0; i < ARRAY_SIZE(st->pbo.download_fs); ++i) {
       for (unsigned j = 0; j < ARRAY_SIZE(st->pbo.download_fs[0]); ++j) {
-         if (st->pbo.download_fs[i][j]) {
-            cso_delete_fragment_shader(st->cso_context, st->pbo.download_fs[i][j]);
-            st->pbo.download_fs[i][j] = NULL;
+         for (unsigned k = 0; k < ARRAY_SIZE(st->pbo.download_fs[0][0]); k++) {
+            if (st->pbo.download_fs[i][j][k]) {
+               st->pipe->delete_fs_state(st->pipe, st->pbo.download_fs[i][j][k]);
+               st->pbo.download_fs[i][j][k] = NULL;
+            }
          }
       }
    }
 
    if (st->pbo.gs) {
-      cso_delete_geometry_shader(st->cso_context, st->pbo.gs);
+      st->pipe->delete_gs_state(st->pipe, st->pbo.gs);
       st->pbo.gs = NULL;
    }
 
    if (st->pbo.vs) {
-      cso_delete_vertex_shader(st->cso_context, st->pbo.vs);
+      st->pipe->delete_vs_state(st->pipe, st->pbo.vs);
       st->pbo.vs = NULL;
    }
 }

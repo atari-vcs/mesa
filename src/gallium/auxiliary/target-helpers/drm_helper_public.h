@@ -1,60 +1,26 @@
 #ifndef _DRM_HELPER_PUBLIC_H
 #define _DRM_HELPER_PUBLIC_H
 
-enum drm_conf;
-struct drm_conf_ret;
-
 struct pipe_screen;
 struct pipe_screen_config;
 
-struct pipe_screen *
-pipe_i915_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_ilo_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_nouveau_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_r300_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_r600_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_radeonsi_create_screen(int fd, const struct pipe_screen_config *config);
-const struct drm_conf_ret *
-pipe_radeonsi_configuration_query(enum drm_conf conf);
-
-struct pipe_screen *
-pipe_vmwgfx_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_freedreno_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_virgl_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_v3d_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_vc4_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_pl111_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_etna_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_imx_drm_create_screen(int fd, const struct pipe_screen_config *config);
-
-struct pipe_screen *
-pipe_tegra_create_screen(int fd, const struct pipe_screen_config *config);
-
-const struct drm_conf_ret *
-pipe_default_configuration_query(enum drm_conf conf);
+extern const struct drm_driver_descriptor i915_driver_descriptor;
+extern const struct drm_driver_descriptor iris_driver_descriptor;
+extern const struct drm_driver_descriptor nouveau_driver_descriptor;
+extern const struct drm_driver_descriptor r300_driver_descriptor;
+extern const struct drm_driver_descriptor r600_driver_descriptor;
+extern const struct drm_driver_descriptor radeonsi_driver_descriptor;
+extern const struct drm_driver_descriptor vmwgfx_driver_descriptor;
+extern const struct drm_driver_descriptor kgsl_driver_descriptor;
+extern const struct drm_driver_descriptor msm_driver_descriptor;
+extern const struct drm_driver_descriptor virtio_gpu_driver_descriptor;
+extern const struct drm_driver_descriptor v3d_driver_descriptor;
+extern const struct drm_driver_descriptor vc4_driver_descriptor;
+extern const struct drm_driver_descriptor panfrost_driver_descriptor;
+extern const struct drm_driver_descriptor etnaviv_driver_descriptor;
+extern const struct drm_driver_descriptor tegra_driver_descriptor;
+extern const struct drm_driver_descriptor lima_driver_descriptor;
+extern const struct drm_driver_descriptor zink_driver_descriptor;
+extern const struct drm_driver_descriptor kmsro_driver_descriptor;
 
 #endif /* _DRM_HELPER_PUBLIC_H */

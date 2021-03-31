@@ -1,3 +1,9 @@
+mesa (20.3.4-1apertis1vcs1) atari; urgency=medium
+
+  * Re-enable drivers that need libelf as they're all the AMD related drivers
+
+ -- Sjoerd Simons <sjoerd@collabora.com>  Wed, 31 Mar 2021 15:09:36 +0200
+
 mesa (20.3.4-1apertis1) apertis; urgency=medium
 
   * Sync updates from Debian Bullseye.

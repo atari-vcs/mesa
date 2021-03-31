@@ -2,14 +2,15 @@ mesa (20.3.4-1apertis1) apertis; urgency=medium
 
   * Sync updates from Debian Bullseye.
   * Remaining Apertis specific chanages
-    - Drop the separation of the packages, instead make sure libelf isn’t used.
-    - Don’t build:
-      + libd3dadapter9-mesa
-      + libd3dadapter9-mesa-dev
-      + mesa-opencl-icd.
-    - Only build mesa-vulkan-drivers on amd64.
+    - Make sure libelf isn’t used as it's GPLv2||LGPLv3 dual-licensed which is
+      not suitable for Apertis. In practise that means dropping
+      * AMD vulkan driver
+      * RadeonSI opengl driver
+      * r600 driver
+      * gallium-opencl support.
+    - As per above drop the mesa-opencl-icd package
 
- -- Ritesh Raj Sarraf <ritesh.sarraf@collabora.com>  Thu, 18 Mar 2021 13:39:12 +0530
+ -- Sjoerd Simons <sjoerd@debian.org>  Wed, 31 Mar 2021 14:38:02 +0200
 
 mesa (20.3.4-1) unstable; urgency=medium
 

@@ -25,10 +25,16 @@
 
 #include <stdio.h>
 #include "context.h"
+#include "draw_validate.h"
+
+#include "util/os_misc.h"
+#include "util/simple_mtx.h"
 
 #include "mtypes.h"
 #include "version.h"
 #include "git_sha1.h"
+
+static simple_mtx_t override_lock = _SIMPLE_MTX_INITIALIZER_NP;
 
 /**
  * Scans 'string' to see if it ends with 'ending'.
@@ -72,13 +78,15 @@ get_gl_override(gl_api api, int *version, bool *fwd_context,
 
    STATIC_ASSERT(ARRAY_SIZE(override) == API_OPENGL_LAST + 1);
 
+   simple_mtx_lock(&override_lock);
+
    if (api == API_OPENGLES)
       goto exit;
 
    if (override[api].version < 0) {
       override[api].version = 0;
 
-      version_str = getenv(env_var);
+      version_str = os_get_option(env_var);
       if (version_str) {
          override[api].fc_suffix = check_for_ending(version_str, "FC");
          override[api].compat_suffix = check_for_ending(version_str, "COMPAT");
@@ -108,6 +116,8 @@ exit:
    *version = override[api].version;
    *fwd_context = override[api].fc_suffix;
    *compat_context = override[api].compat_suffix;
+
+   simple_mtx_unlock(&override_lock);
 }
 
 /**
@@ -590,7 +600,7 @@ _mesa_get_version(const struct gl_extensions *extensions,
       if (!consts->AllowHigherCompatVersion) {
          consts->GLSLVersion = consts->GLSLVersionCompat;
       }
-      /* fall through */
+      FALLTHROUGH;
    case API_OPENGL_CORE:
       return compute_version(extensions, consts, api);
    case API_OPENGLES:
@@ -667,6 +677,35 @@ _mesa_compute_version(struct gl_context *ctx)
 done:
    if (ctx->API == API_OPENGL_COMPAT && ctx->Version >= 31)
       ctx->Extensions.ARB_compatibility = GL_TRUE;
+
+   /* Precompute valid primitive types for faster draw time validation. */
+   /* All primitive type enums are less than 32, so we can use the shift. */
+   ctx->SupportedPrimMask = (1 << GL_POINTS) |
+                           (1 << GL_LINES) |
+                           (1 << GL_LINE_LOOP) |
+                           (1 << GL_LINE_STRIP) |
+                           (1 << GL_TRIANGLES) |
+                           (1 << GL_TRIANGLE_STRIP) |
+                           (1 << GL_TRIANGLE_FAN);
+
+   if (ctx->API == API_OPENGL_COMPAT) {
+      ctx->SupportedPrimMask |= (1 << GL_QUADS) |
+                               (1 << GL_QUAD_STRIP) |
+                               (1 << GL_POLYGON);
+   }
+
+   if (_mesa_has_geometry_shaders(ctx)) {
+      ctx->SupportedPrimMask |= (1 << GL_LINES_ADJACENCY) |
+                               (1 << GL_LINE_STRIP_ADJACENCY) |
+                               (1 << GL_TRIANGLES_ADJACENCY) |
+                               (1 << GL_TRIANGLE_STRIP_ADJACENCY);
+   }
+
+   if (_mesa_has_tessellation(ctx))
+      ctx->SupportedPrimMask |= 1 << GL_PATCHES;
+
+   /* First time initialization. */
+   _mesa_update_valid_to_render_state(ctx);
 }
 
 

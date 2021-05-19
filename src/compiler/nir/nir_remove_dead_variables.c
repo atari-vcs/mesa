@@ -71,8 +71,16 @@ add_var_use_deref(nir_deref_instr *deref, struct set *live)
     * make them live.  Only keep them if they are used by some intrinsic.
     */
    if ((deref->var->data.mode & (nir_var_function_temp |
-                                 nir_var_shader_temp |
-                                 nir_var_mem_shared)) &&
+                                 nir_var_shader_temp)) &&
+       !deref_used_for_not_store(deref))
+      return;
+
+   /*
+    * Shared memory blocks (interface type) alias each other, so be
+    * conservative in that case.
+    */
+   if ((deref->var->data.mode & nir_var_mem_shared) &&
+       !glsl_type_is_interface(deref->var->type) &&
        !deref_used_for_not_store(deref))
       return;
 
@@ -100,7 +108,7 @@ add_var_use_shader(nir_shader *shader, struct set *live, nir_variable_mode modes
 }
 
 static void
-remove_dead_var_writes(nir_shader *shader, struct set *live)
+remove_dead_var_writes(nir_shader *shader)
 {
    nir_foreach_function(function, shader) {
       if (!function->impl)
@@ -201,12 +209,14 @@ nir_remove_dead_variables(nir_shader *shader, nir_variable_mode modes,
       }
    }
 
+   _mesa_set_destroy(live, NULL);
+
    nir_foreach_function(function, shader) {
       if (!function->impl)
          continue;
 
       if (progress) {
-         remove_dead_var_writes(shader, live);
+         remove_dead_var_writes(shader);
          nir_metadata_preserve(function->impl, nir_metadata_block_index |
                                                nir_metadata_dominance);
       } else {
@@ -214,6 +224,5 @@ nir_remove_dead_variables(nir_shader *shader, nir_variable_mode modes,
       }
    }
 
-   _mesa_set_destroy(live, NULL);
    return progress;
 }

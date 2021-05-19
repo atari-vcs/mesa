@@ -86,7 +86,6 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 	if (bd->valid)
 		return false;
 
-	struct ir3_instruction *last_input = NULL;
 	struct ir3_instruction *last_rel = NULL;
 	struct ir3_instruction *last_n = NULL;
 	struct list_head instr_list;
@@ -112,6 +111,20 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		regmask_or(&state->needs_sy,
 				&state->needs_sy, &pstate->needs_sy);
 	}
+
+	unsigned input_count = 0;
+
+	foreach_instr (n, &block->instr_list) {
+		if (is_input(n)) {
+			input_count++;
+		}
+	}
+
+	unsigned inputs_remaining = input_count;
+
+	/* Inputs can only be in the first block */
+	assert(input_count == 0 ||
+		   block == list_first_entry(&block->shader->block_list, struct ir3_block, node));
 
 	/* remove all the instructions from the list, we'll be adding
 	 * them back in as we go
@@ -230,6 +243,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 					samgp->flags |= IR3_INSTR_SY;
 			}
 		} else {
+			list_delinit(&n->node);
 			list_addtail(&n->node, &block->instr_list);
 		}
 
@@ -279,43 +293,46 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		}
 
 		if (is_input(n)) {
-			last_input = n;
 			last_input_needs_ss |= (n->opc == OPC_LDLV);
+
+			assert(inputs_remaining > 0);
+			inputs_remaining--;
+			if (inputs_remaining == 0) {
+				/* This is the last input. We add the (ei) flag to release
+				 * varying memory after this executes. If it's an ldlv,
+				 * however, we need to insert a dummy bary.f on which we can
+				 * set the (ei) flag. We may also need to insert an (ss) to
+				 * guarantee that all ldlv's have finished fetching their
+				 * results before releasing the varying memory.
+				 */
+				struct ir3_instruction *last_input = n;
+				if (n->opc == OPC_LDLV) {
+					struct ir3_instruction *baryf;
+
+					/* (ss)bary.f (ei)r63.x, 0, r0.x */
+					baryf = ir3_instr_create(block, OPC_BARY_F, 3);
+					ir3_reg_create(baryf, regid(63, 0), 0);
+					ir3_reg_create(baryf, 0, IR3_REG_IMMED)->iim_val = 0;
+					ir3_reg_create(baryf, regid(0, 0), 0);
+
+					last_input = baryf;
+				}
+
+				last_input->regs[0]->flags |= IR3_REG_EI;
+				if (last_input_needs_ss) {
+					last_input->flags |= IR3_INSTR_SS;
+					regmask_init(&state->needs_ss_war, mergedregs);
+					regmask_init(&state->needs_ss, mergedregs);
+				}
+			}
 		}
 
 		last_n = n;
 	}
 
-	if (last_input) {
-		assert(block == list_first_entry(&block->shader->block_list,
-				struct ir3_block, node));
-		/* special hack.. if using ldlv to bypass interpolation,
-		 * we need to insert a dummy bary.f on which we can set
-		 * the (ei) flag:
-		 */
-		if (is_mem(last_input) && (last_input->opc == OPC_LDLV)) {
-			struct ir3_instruction *baryf;
+	assert(inputs_remaining == 0);
 
-			/* (ss)bary.f (ei)r63.x, 0, r0.x */
-			baryf = ir3_instr_create(block, OPC_BARY_F);
-			ir3_reg_create(baryf, regid(63, 0), 0);
-			ir3_reg_create(baryf, 0, IR3_REG_IMMED)->iim_val = 0;
-			ir3_reg_create(baryf, regid(0, 0), 0);
-
-			/* insert the dummy bary.f after last_input: */
-			ir3_instr_move_after(baryf, last_input);
-
-			last_input = baryf;
-
-			/* by definition, we need (ss) since we are inserting
-			 * the dummy bary.f immediately after the ldlv:
-			 */
-			last_input_needs_ss = true;
-		}
-		last_input->regs[0]->flags |= IR3_REG_EI;
-		if (last_input_needs_ss)
-			last_input->flags |= IR3_INSTR_SS;
-	} else if (has_tex_prefetch) {
+	if (has_tex_prefetch && input_count == 0) {
 		/* texture prefetch, but *no* inputs.. we need to insert a
 		 * dummy bary.f at the top of the shader to unblock varying
 		 * storage:
@@ -323,7 +340,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		struct ir3_instruction *baryf;
 
 		/* (ss)bary.f (ei)r63.x, 0, r0.x */
-		baryf = ir3_instr_create(block, OPC_BARY_F);
+		baryf = ir3_instr_create(block, OPC_BARY_F, 3);
 		ir3_reg_create(baryf, regid(63, 0), 0)->flags |= IR3_REG_EI;
 		ir3_reg_create(baryf, 0, IR3_REG_IMMED)->iim_val = 0;
 		ir3_reg_create(baryf, regid(0, 0), 0);
@@ -517,7 +534,7 @@ resolve_jump(struct ir3_instruction *instr)
 	 * then we can just drop the jump.
 	 */
 	unsigned next_block;
-	if (instr->cat0.inv == true)
+	if (instr->cat0.inv1 == true)
 		next_block = 2;
 	else
 		next_block = 1;
@@ -609,7 +626,7 @@ block_sched(struct ir3 *ir)
 			 * frequently/always end up being a fall-thru):
 			 */
 			br = ir3_B(block, block->condition, 0);
-			br->cat0.inv = true;
+			br->cat0.inv1 = true;
 			br->cat0.target = block->successors[1];
 
 			/* "then" branch: */
@@ -667,7 +684,7 @@ kill_sched(struct ir3 *ir, struct ir3_shader_variant *so)
 			if (instr->opc != OPC_KILL)
 				continue;
 
-			struct ir3_instruction *br = ir3_instr_create(block, OPC_B);
+			struct ir3_instruction *br = ir3_instr_create(block, OPC_B, 2);
 			br->regs[1] = instr->regs[1];
 			br->cat0.target =
 				list_last_entry(&ir->block_list, struct ir3_block, node);

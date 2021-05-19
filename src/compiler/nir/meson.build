@@ -74,6 +74,15 @@ nir_intrinsics_h = custom_target(
   depend_files : files('nir_intrinsics.py'),
 )
 
+nir_intrinsics_indices_h = custom_target(
+  'nir_intrinsics_indices.h',
+  input : 'nir_intrinsics_indices_h.py',
+  output : 'nir_intrinsics_indices.h',
+  command : [prog_python, '@INPUT@', '--outdir', meson.current_build_dir()],
+  capture : false,
+  depend_files : files('nir_intrinsics.py'),
+)
+
 nir_intrinsics_c = custom_target(
   'nir_intrinsic.c',
   input : 'nir_intrinsics_c.py',
@@ -132,12 +141,13 @@ files_libnir = files(
   'nir_lower_clip_halfz.c',
   'nir_lower_convert_alu_types.c',
   'nir_lower_variable_initializers.c',
-  'nir_lower_discard_to_demote.c',
+  'nir_lower_discard_or_demote.c',
   'nir_lower_double_ops.c',
   'nir_lower_drawpixels.c',
   'nir_lower_fb_read.c',
   'nir_lower_flatshade.c',
   'nir_lower_flrp.c',
+  'nir_lower_fp16_conv.c',
   'nir_lower_fragcoord_wtrans.c',
   'nir_lower_fragcolor.c',
   'nir_lower_frexp.c',
@@ -158,7 +168,7 @@ files_libnir = files(
   'nir_lower_io_to_scalar.c',
   'nir_lower_io_to_vector.c',
   'nir_lower_multiview.c',
-  'nir_lower_mediump_outputs.c',
+  'nir_lower_mediump.c',
   'nir_lower_memcpy.c',
   'nir_lower_memory_model.c',
   'nir_lower_non_uniform_access.c',
@@ -169,6 +179,7 @@ files_libnir = files(
   'nir_lower_pntc_ytransform.c',
   'nir_lower_point_size.c',
   'nir_lower_point_size_mov.c',
+  'nir_lower_printf.c',
   'nir_lower_regs_to_ssa.c',
   'nir_lower_returns.c',
   'nir_lower_samplers.c',
@@ -177,8 +188,10 @@ files_libnir = files(
   'nir_lower_subgroups.c',
   'nir_lower_system_values.c',
   'nir_lower_tex.c',
+  'nir_lower_texcoord_replace.c',
   'nir_lower_to_source_mods.c',
   'nir_lower_two_sided_color.c',
+  'nir_lower_undef_to_zero.c',
   'nir_lower_vars_to_ssa.c',
   'nir_lower_var_copies.c',
   'nir_lower_vec_to_movs.c',
@@ -215,6 +228,7 @@ files_libnir = files(
   'nir_opt_loop_unroll.c',
   'nir_opt_memcpy.c',
   'nir_opt_move.c',
+  'nir_opt_offsets.c',
   'nir_opt_peephole_select.c',
   'nir_opt_rematerialize_compares.c',
   'nir_opt_remove_phis.c',
@@ -323,23 +337,24 @@ _libnir = static_library(
   'nir',
   [files_libnir, spirv_info_c, nir_opt_algebraic_c, nir_opcodes_c,
    nir_opcodes_h, nir_constant_expressions_c, nir_builder_opcodes_h,
-   vtn_gather_types_c, nir_intrinsics_c, nir_intrinsics_h, vtn_generator_ids_h],
+   vtn_gather_types_c, nir_intrinsics_c, nir_intrinsics_h, nir_intrinsics_indices_h, vtn_generator_ids_h],
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_compiler, include_directories('../spirv')],
   c_args : [c_msvc_compat_args, no_override_init_args, _libnir_args],
   gnu_symbol_visibility : 'hidden',
+  dependencies : dep_valgrind,
   link_with : libcompiler,
   build_by_default : false,
 )
 
 # Headers-only dependency
 idep_nir_headers = declare_dependency(
-  sources : [nir_opcodes_h, nir_builder_opcodes_h, nir_intrinsics_h],
+  sources : [nir_opcodes_h, nir_builder_opcodes_h, nir_intrinsics_h, nir_intrinsics_indices_h],
   include_directories : include_directories('.'),
 )
 
 # Also link with nir
 idep_nir = declare_dependency(
-  dependencies : idep_nir_headers,
+  dependencies : [idep_nir_headers, idep_mesautil],
   link_with : _libnir,
 )
 
@@ -466,6 +481,19 @@ if with_tests
       'nir_lower_returns_tests',
       files('tests/lower_returns_tests.cpp'),
       cpp_args : [cpp_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+    ),
+    suite : ['compiler', 'nir'],
+  )
+
+  test(
+    'ssa_def_bits_used',
+    executable(
+      'ssa_def_bits_used',
+      files('tests/ssa_def_bits_used_tests.cpp'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
       dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],

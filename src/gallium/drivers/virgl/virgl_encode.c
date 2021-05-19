@@ -248,6 +248,8 @@ static const enum virgl_formats virgl_formats_conv_table[PIPE_FORMAT_COUNT] = {
    CONV_FORMAT(R10G10B10X2_UNORM)
    CONV_FORMAT(A4B4G4R4_UNORM)
    CONV_FORMAT(R8_SRGB)
+   CONV_FORMAT(R8G8_SRGB)
+   CONV_FORMAT(ETC1_RGB8)
    CONV_FORMAT(ETC2_RGB8)
    CONV_FORMAT(ETC2_SRGB8)
    CONV_FORMAT(ETC2_RGB8A1)
@@ -258,6 +260,34 @@ static const enum virgl_formats virgl_formats_conv_table[PIPE_FORMAT_COUNT] = {
    CONV_FORMAT(ETC2_R11_SNORM)
    CONV_FORMAT(ETC2_RG11_UNORM)
    CONV_FORMAT(ETC2_RG11_SNORM)
+   CONV_FORMAT(ASTC_4x4)
+   CONV_FORMAT(ASTC_5x4)
+   CONV_FORMAT(ASTC_5x5)
+   CONV_FORMAT(ASTC_6x5)
+   CONV_FORMAT(ASTC_6x6)
+   CONV_FORMAT(ASTC_8x5)
+   CONV_FORMAT(ASTC_8x6)
+   CONV_FORMAT(ASTC_8x8)
+   CONV_FORMAT(ASTC_10x5)
+   CONV_FORMAT(ASTC_10x6)
+   CONV_FORMAT(ASTC_10x8)
+   CONV_FORMAT(ASTC_10x10)
+   CONV_FORMAT(ASTC_12x10)
+   CONV_FORMAT(ASTC_12x12)
+   CONV_FORMAT(ASTC_4x4_SRGB)
+   CONV_FORMAT(ASTC_5x4_SRGB)
+   CONV_FORMAT(ASTC_5x5_SRGB)
+   CONV_FORMAT(ASTC_6x5_SRGB)
+   CONV_FORMAT(ASTC_6x6_SRGB)
+   CONV_FORMAT(ASTC_8x5_SRGB)
+   CONV_FORMAT(ASTC_8x6_SRGB)
+   CONV_FORMAT(ASTC_8x8_SRGB )
+   CONV_FORMAT(ASTC_10x5_SRGB)
+   CONV_FORMAT(ASTC_10x6_SRGB)
+   CONV_FORMAT(ASTC_10x8_SRGB)
+   CONV_FORMAT(ASTC_10x10_SRGB)
+   CONV_FORMAT(ASTC_12x10_SRGB)
+   CONV_FORMAT(ASTC_12x12_SRGB)
 };
 
 enum virgl_formats pipe_to_virgl_format(enum pipe_format format)
@@ -367,11 +397,11 @@ int virgl_encode_dsa_state(struct virgl_context *ctx,
    virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, VIRGL_OBJ_DSA_SIZE));
    virgl_encoder_write_dword(ctx->cbuf, handle);
 
-   tmp = VIRGL_OBJ_DSA_S0_DEPTH_ENABLE(dsa_state->depth.enabled) |
-      VIRGL_OBJ_DSA_S0_DEPTH_WRITEMASK(dsa_state->depth.writemask) |
-      VIRGL_OBJ_DSA_S0_DEPTH_FUNC(dsa_state->depth.func) |
-      VIRGL_OBJ_DSA_S0_ALPHA_ENABLED(dsa_state->alpha.enabled) |
-      VIRGL_OBJ_DSA_S0_ALPHA_FUNC(dsa_state->alpha.func);
+   tmp = VIRGL_OBJ_DSA_S0_DEPTH_ENABLE(dsa_state->depth_enabled) |
+      VIRGL_OBJ_DSA_S0_DEPTH_WRITEMASK(dsa_state->depth_writemask) |
+      VIRGL_OBJ_DSA_S0_DEPTH_FUNC(dsa_state->depth_func) |
+      VIRGL_OBJ_DSA_S0_ALPHA_ENABLED(dsa_state->alpha_enabled) |
+      VIRGL_OBJ_DSA_S0_ALPHA_FUNC(dsa_state->alpha_func);
    virgl_encoder_write_dword(ctx->cbuf, tmp);
 
    for (i = 0; i < 2; i++) {
@@ -385,7 +415,7 @@ int virgl_encode_dsa_state(struct virgl_context *ctx,
       virgl_encoder_write_dword(ctx->cbuf, tmp);
    }
 
-   virgl_encoder_write_dword(ctx->cbuf, fui(dsa_state->alpha.ref_value));
+   virgl_encoder_write_dword(ctx->cbuf, fui(dsa_state->alpha_ref_value));
    return 0;
 }
 int virgl_encode_rasterizer_state(struct virgl_context *ctx,
@@ -707,27 +737,29 @@ int virgl_encoder_set_index_buffer(struct virgl_context *ctx,
 }
 
 int virgl_encoder_draw_vbo(struct virgl_context *ctx,
-                          const struct pipe_draw_info *info)
+                           const struct pipe_draw_info *info,
+                           const struct pipe_draw_indirect_info *indirect,
+                           const struct pipe_draw_start_count *draw)
 {
    uint32_t length = VIRGL_DRAW_VBO_SIZE;
    if (info->mode == PIPE_PRIM_PATCHES)
       length = VIRGL_DRAW_VBO_SIZE_TESS;
-   if (info->indirect)
+   if (indirect && indirect->buffer)
       length = VIRGL_DRAW_VBO_SIZE_INDIRECT;
    virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO, 0, length));
-   virgl_encoder_write_dword(ctx->cbuf, info->start);
-   virgl_encoder_write_dword(ctx->cbuf, info->count);
+   virgl_encoder_write_dword(ctx->cbuf, draw->start);
+   virgl_encoder_write_dword(ctx->cbuf, draw->count);
    virgl_encoder_write_dword(ctx->cbuf, info->mode);
    virgl_encoder_write_dword(ctx->cbuf, !!info->index_size);
    virgl_encoder_write_dword(ctx->cbuf, info->instance_count);
-   virgl_encoder_write_dword(ctx->cbuf, info->index_bias);
+   virgl_encoder_write_dword(ctx->cbuf, info->index_size ? info->index_bias : 0);
    virgl_encoder_write_dword(ctx->cbuf, info->start_instance);
    virgl_encoder_write_dword(ctx->cbuf, info->primitive_restart);
    virgl_encoder_write_dword(ctx->cbuf, info->restart_index);
-   virgl_encoder_write_dword(ctx->cbuf, info->min_index);
-   virgl_encoder_write_dword(ctx->cbuf, info->max_index);
-   if (info->count_from_stream_output)
-      virgl_encoder_write_dword(ctx->cbuf, info->count_from_stream_output->buffer_size);
+   virgl_encoder_write_dword(ctx->cbuf, info->index_bounds_valid ? info->min_index : 0);
+   virgl_encoder_write_dword(ctx->cbuf, info->index_bounds_valid ? info->max_index : ~0);
+   if (indirect && indirect->count_from_stream_output)
+      virgl_encoder_write_dword(ctx->cbuf, indirect->count_from_stream_output->buffer_size);
    else
       virgl_encoder_write_dword(ctx->cbuf, 0);
    if (length >= VIRGL_DRAW_VBO_SIZE_TESS) {
@@ -735,13 +767,13 @@ int virgl_encoder_draw_vbo(struct virgl_context *ctx,
       virgl_encoder_write_dword(ctx->cbuf, info->drawid); /* drawid */
    }
    if (length == VIRGL_DRAW_VBO_SIZE_INDIRECT) {
-      virgl_encoder_write_res(ctx, virgl_resource(info->indirect->buffer));
-      virgl_encoder_write_dword(ctx->cbuf, info->indirect->offset);
-      virgl_encoder_write_dword(ctx->cbuf, info->indirect->stride); /* indirect stride */
-      virgl_encoder_write_dword(ctx->cbuf, info->indirect->draw_count); /* indirect draw count */
-      virgl_encoder_write_dword(ctx->cbuf, info->indirect->indirect_draw_count_offset); /* indirect draw count offset */
-      if (info->indirect->indirect_draw_count)
-         virgl_encoder_write_res(ctx, virgl_resource(info->indirect->indirect_draw_count));
+      virgl_encoder_write_res(ctx, virgl_resource(indirect->buffer));
+      virgl_encoder_write_dword(ctx->cbuf, indirect->offset);
+      virgl_encoder_write_dword(ctx->cbuf, indirect->stride); /* indirect stride */
+      virgl_encoder_write_dword(ctx->cbuf, indirect->draw_count); /* indirect draw count */
+      virgl_encoder_write_dword(ctx->cbuf, indirect->indirect_draw_count_offset); /* indirect draw count offset */
+      if (indirect->indirect_draw_count)
+         virgl_encoder_write_res(ctx, virgl_resource(indirect->indirect_draw_count));
       else
          virgl_encoder_write_dword(ctx->cbuf, 0); /* indirect draw count handle */
    }
@@ -1473,4 +1505,27 @@ void virgl_encode_end_transfers(struct virgl_cmd_buf *buf)
       command = VIRGL_CMD0(VIRGL_CCMD_END_TRANSFERS, 0, diff - 1);
       virgl_encoder_write_dword(buf, command);
    }
+}
+
+void virgl_encode_get_memory_info(struct virgl_context *ctx, struct virgl_resource *res)
+{
+   virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_GET_MEMORY_INFO, 0, 1));
+   virgl_encoder_write_res(ctx, res);
+}
+
+void virgl_encode_emit_string_marker(struct virgl_context *ctx,
+                                     const char *message, int len)
+{
+    if (!len)
+      return;
+
+   if (len > 4 * 0xffff) {
+      debug_printf("VIRGL: host debug flag string too long, will be truncated\n");
+      len = 4 * 0xffff;
+   }
+
+   uint32_t buf_len = (uint32_t )(len + 3) / 4 + 1;
+   virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_EMIT_STRING_MARKER, 0, buf_len));
+   virgl_encoder_write_dword(ctx->cbuf, len);
+   virgl_encoder_write_block(ctx->cbuf, (const uint8_t *)message, len);
 }

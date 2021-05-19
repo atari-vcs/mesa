@@ -392,7 +392,7 @@ intel_create_image_from_texture(__DRIcontext *context, int target,
       return NULL;
    }
 
-   if (level < obj->BaseLevel || level > obj->_MaxLevel) {
+   if (level < obj->Attrib.BaseLevel || level > obj->_MaxLevel) {
       *error = __DRI_IMAGE_ERROR_BAD_MATCH;
       return NULL;
    }
@@ -912,8 +912,7 @@ intelCreateBuffer(__DRIscreen * driScrnPriv,
                                   false, /* never sw depth */
                                   false, /* never sw stencil */
                                   mesaVis->accumRedBits > 0,
-                                  false, /* never sw alpha */
-                                  false  /* never sw aux */ );
+                                  false /* never sw alpha */);
    driDrawPriv->driverPrivate = fb;
 
    return true;
@@ -1067,7 +1066,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
                                      num_depth_stencil_bits,
                                      back_buffer_modes, 2,
                                      singlesample_samples, 1,
-                                     false, false, false);
+                                     false, false);
       configs = driConcatConfigs(configs, new_configs);
    }
 
@@ -1089,7 +1088,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
                                      depth_bits, stencil_bits, 1,
                                      back_buffer_modes, 1,
                                      singlesample_samples, 1,
-                                     true, false, false);
+                                     true, false);
       configs = driConcatConfigs(configs, new_configs);
    }
 

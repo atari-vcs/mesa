@@ -30,6 +30,8 @@
 /// understood by pipe drivers.
 ///
 
+#include <llvm/Support/Allocator.h>
+
 #include "llvm/codegen.hpp"
 #include "llvm/metadata.hpp"
 
@@ -40,7 +42,8 @@
 
 #include <clang/Basic/TargetInfo.h>
 
-using namespace clover;
+using clover::module;
+using clover::detokenize;
 using namespace clover::llvm;
 
 using ::llvm::Module;
@@ -54,22 +57,20 @@ namespace {
    enum module::argument::type
    get_image_type(const std::string &type,
                   const std::string &qual) {
-      if (type == "image2d_t" && qual == "read_only")
-         return module::argument::image2d_rd;
-      else if (type == "image2d_t" && qual == "write_only")
-         return module::argument::image2d_wr;
-      else if (type == "image3d_t" && qual == "read_only")
-         return module::argument::image3d_rd;
-      else if (type == "image3d_t" && qual == "write_only")
-         return module::argument::image3d_wr;
-      else
-         unreachable("Unknown image type");
+      if (type == "image1d_t" || type == "image2d_t" || type == "image3d_t") {
+         if (qual == "read_only")
+            return module::argument::image_rd;
+         else if (qual == "write_only")
+            return module::argument::image_wr;
+      }
+
+      unreachable("Unsupported image type");
    }
 
    module::arg_info create_arg_info(const std::string &arg_name,
                                     const std::string &type_name,
                                     const std::string &type_qualifier,
-                                    const int address_qualifier,
+                                    const uint64_t address_qualifier,
                                     const std::string &access_qualifier) {
 
       cl_kernel_arg_type_qualifier cl_type_qualifier =

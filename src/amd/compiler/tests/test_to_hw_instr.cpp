@@ -197,7 +197,7 @@ BEGIN_TEST(to_hw_instr.swap_subdword)
                                        Definition(v0_lo, v1),
                                        Operand(v0_lo, v1b), Operand(v0_lo, v1b),
                                        Operand(v0_lo, v1b), Operand(v0_lo, v1b));
-      static_cast<Pseudo_instruction*>(pseudo)->scratch_sgpr = m0;
+      pseudo->pseudo().scratch_sgpr = m0;
 
       //~gfx[67]! p_unit_test 14
       //~gfx[67]! v1b: %0:v[1][0:8] = v_mov_b32 %0:v[0][0:8]
@@ -472,4 +472,29 @@ BEGIN_TEST(to_hw_instr.subdword_constant)
 
       finish_to_hw_instr_test();
    }
+END_TEST
+
+BEGIN_TEST(to_hw_instr.self_intersecting_swap)
+   if (!setup_cs(NULL, GFX9))
+      return;
+
+   PhysReg reg_v1{257};
+   PhysReg reg_v2{258};
+   PhysReg reg_v3{259};
+   PhysReg reg_v7{263};
+
+   //>> p_unit_test 0
+   //! v1: %0:v[1],  v1: %0:v[2] = v_swap_b32 %0:v[2], %0:v[1]
+   //! v1: %0:v[2],  v1: %0:v[3] = v_swap_b32 %0:v[3], %0:v[2]
+   //! v1: %0:v[3],  v1: %0:v[7] = v_swap_b32 %0:v[7], %0:v[3]
+   //! s_endpgm
+   bld.pseudo(aco_opcode::p_unit_test, Operand(0u));
+   //v[1:2] = v[2:3]
+   //v3 = v7
+   //v7 = v1
+   bld.pseudo(aco_opcode::p_parallelcopy,
+              Definition(reg_v1, v2), Definition(reg_v3, v1), Definition(reg_v7, v1),
+              Operand(reg_v2, v2), Operand(reg_v7, v1), Operand(reg_v1, v1));
+
+   finish_to_hw_instr_test();
 END_TEST

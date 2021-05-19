@@ -165,6 +165,9 @@ The integer capabilities:
   TEXCOORD semantic.
   Also, TGSI_SEMANTIC_PCOORD becomes available, which labels a fragment shader
   input that will always be replaced with sprite coordinates.
+* ``PIPE_CAP_TEXTURE_BUFFER_SAMPLER``: Whether a sampler should still
+  be used for PIPE_BUFFER resources (normally a sampler is only used
+  if the texture target is PIPE_TEXTURE_*).
 * ``PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER``: Whether it is preferable
   to use a blit to implement a texture transfer which needs format conversions
   and swizzling in gallium frontends. Generally, all hardware drivers with
@@ -303,7 +306,8 @@ The integer capabilities:
   selecting the interpolation weights with a conditional assignment
   in the shader.
 * ``PIPE_CAP_SHAREABLE_SHADERS``: Whether shader CSOs can be used by any
-  pipe_context.
+  pipe_context.  Important for reducing jank at draw time by letting GL shaders
+  linked in one thread be used in another thread without recompiling.
 * ``PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS``:
   Whether copying between compressed and plain formats is supported where
   a compressed block is copied to/from a plain pixel of the same size.
@@ -385,6 +389,10 @@ The integer capabilities:
   equal interpolation qualifiers.
   Components may overlap, notably when the gaps in an array of dvec3 are
   filled in.
+* ``PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME``: Whether GL_ARB_transform_feeddback2
+  is supported, including pausing/resuming queries and having
+  `count_from_stream_output` set on indirect draws to implement
+  glDrawTransformFeedback.  Required for OpenGL 4.0.
 * ``PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS``: Whether interleaved stream
   output mode is able to interleave across buffers. This is required for
   ARB_transform_feedback3.
@@ -473,7 +481,8 @@ The integer capabilities:
   those bits set, pipe_context::set_constant_buffer(.., 0, ..) is ignored
   by the driver, and the driver can throw assertion failures.
 * ``PIPE_CAP_PACKED_UNIFORMS``: True if the driver supports packed uniforms
-  as opposed to padding to vec4s.
+  as opposed to padding to vec4s.  Requires ``PIPE_SHADER_CAP_INTEGERS`` if
+  ``lower_uniforms_to_ubo`` is set.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_POST_SNAP_TRIANGLES``: Whether the
   ``PIPE_CONSERVATIVE_RASTER_POST_SNAP`` mode is supported for triangles.
   The post-snap mode means the conservative rasterization occurs after
@@ -568,11 +577,20 @@ The integer capabilities:
 * ``PIPE_CAP_GL_SPIRV_VARIABLE_POINTERS``: True if the driver supports Variable Pointers in SPIR-V shaders.
 * ``PIPE_CAP_DEMOTE_TO_HELPER_INVOCATION``: True if driver supports demote keyword in GLSL programs.
 * ``PIPE_CAP_TGSI_TG4_COMPONENT_IN_SWIZZLE``: True if driver wants the TG4 component encoded in sampler swizzle rather than as a separate source.
-* ``PIPE_CAP_FLATSHADE``: Driver supports pipe_rasterizer_state::flatshade.
-* ``PIPE_CAP_ALPHA_TEST``: Driver supports alpha-testing.
+* ``PIPE_CAP_FLATSHADE``: Driver supports pipe_rasterizer_state::flatshade.  Must be 1
+    for non-NIR drivers or gallium nine.
+* ``PIPE_CAP_ALPHA_TEST``: Driver supports alpha-testing.  Must be 1
+    for non-NIR drivers or gallium nine.  If set, frontend may set
+    ``pipe_depth_stencil_alpha_state->alpha_enabled`` and ``alpha_func``.
+    Otherwise, alpha test will be lowered to a comparison and discard_if in the
+    fragment shader.
 * ``PIPE_CAP_POINT_SIZE_FIXED``: Driver supports point-sizes that are fixed,
   as opposed to writing gl_PointSize for every point.
-* ``PIPE_CAP_TWO_SIDED_COLOR``: Driver supports two-sided coloring.
+* ``PIPE_CAP_TWO_SIDED_COLOR``: Driver supports two-sided coloring.  Must be 1
+    for non-NIR drivers.  If set, pipe_rasterizer_state may be set to indicate
+    that backfacing primitives should use the back-side color as the FS input
+    color.  If unset, mesa/st will lower it to gl_FrontFacing reads in the
+    fragment shader.
 * ``PIPE_CAP_CLIP_PLANES``: Driver supports user-defined clip-planes.
 * ``PIPE_CAP_MAX_VERTEX_BUFFERS``: Number of supported vertex buffers.
 * ``PIPE_CAP_OPENCL_INTEGER_FUNCTIONS``: Driver supports extended OpenCL-style integer functions.  This includes averge, saturating additiong, saturating subtraction, absolute difference, count leading zeros, and count trailing zeros.
@@ -581,7 +599,6 @@ The integer capabilities:
 * ``PIPE_CAP_PACKED_STREAM_OUTPUT``: Driver supports packing optimization for stream output (e.g. GL transform feedback captured variables). Defaults to true.
 * ``PIPE_CAP_VIEWPORT_TRANSFORM_LOWERED``: Driver needs the nir_lower_viewport_transform pass to be enabled. This also means that the gl_Position value is modified and should be lowered for transform feedback, if needed. Defaults to false.
 * ``PIPE_CAP_PSIZ_CLAMPED``: Driver needs for the point size to be clamped. Additionally, the gl_PointSize has been modified and its value should be lowered for transform feedback, if needed. Defaults to false.
-* ``PIPE_CAP_DRAW_INFO_START_WITH_USER_INDICES``: pipe_draw_info::start can be non-zero with user indices.
 * ``PIPE_CAP_GL_BEGIN_END_BUFFER_SIZE``: Buffer size used to upload vertices for glBegin/glEnd.
 * ``PIPE_CAP_VIEWPORT_SWIZZLE``: Whether pipe_viewport_state::swizzle can be used to specify pre-clipping swizzling of coordinates (see GL_NV_viewport_swizzle).
 * ``PIPE_CAP_SYSTEM_SVM``: True if all application memory can be shared with the GPU without explicit mapping.
@@ -593,6 +610,10 @@ The integer capabilities:
 * ``PIPE_CAP_NO_CLIP_ON_COPY_TEX``: Driver doesn't want x/y/width/height clipped based on src size when doing a copy texture operation (eg: may want out-of-bounds reads that produce 0 instead of leaving the texture content undefined)
 * ``PIPE_CAP_MAX_TEXTURE_MB``: Maximum texture size in MB (default is 1024)
 * ``PIPE_CAP_DEVICE_PROTECTED_CONTENT``: Whether the device support protected / encrypted content.
+* ``PIPE_CAP_PREFER_REAL_BUFFER_IN_CONSTBUF0``: The state tracker is encouraged to upload constants into a real buffer and bind it into constant buffer 0 instead of binding a user pointer. This may enable a faster codepath in a gallium frontend for drivers that really prefer a real buffer.
+* ``PIPE_CAP_GL_CLAMP``: Driver natively supports GL_CLAMP.  Required for non-NIR drivers with the GL frontend.  NIR drivers with the cap unavailable will have GL_CLAMP lowered to txd/txl with a saturate on the coordinates.
+* ``PIPE_CAP_TEXRECT``: Driver supports rectangle textures.  Required for OpenGL on `!prefers_nir` drivers.  If this cap is not present, st/mesa will lower the NIR to use normal 2D texture sampling by using either `txs` or `nir_intrinsic_load_texture_scaling` to normalize the texture coordinates.
+* ``PIPE_CAP_SAMPLER_REDUCTION_MINMAX``: Driver support min/max sampler reduction.
 
 .. _pipe_capf:
 
@@ -665,6 +686,11 @@ MOV OUT[0], CONST[0][3]  # copy vector 3 of constbuf 0
    If unsupported, half precision ops need to be lowered to full precision.
 * ``PIPE_SHADER_CAP_FP16_DERIVATIVES``: Whether half precision floating-point
   DDX and DDY opcodes are supported.
+* ``PIPE_SHADER_CAP_FP16_CONST_BUFFERS``: Whether half precision floating-point
+  constant buffer loads are supported. Drivers are recommended to report 0
+  if x86 F16C is not supported by the CPU (or an equivalent instruction set
+  on other CPU architectures), otherwise they could be impacted by emulated
+  FP16 conversions in glUniform.
 * ``PIPE_SHADER_CAP_INT16``: Whether 16-bit signed and unsigned integer types
   are supported.
 * ``PIPE_SHADER_CAP_GLSL_16BIT_CONSTS``: Lower mediump constants to 16-bit.
@@ -1031,6 +1057,28 @@ Returns a pointer to a driver-specific on-disk shader cache. If the driver
 failed to create the cache or does not support an on-disk shader cache NULL is
 returned. The callback itself may also be NULL if the driver doesn't support
 an on-disk shader cache.
+
+
+is_dmabuf_modifier_supported
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Query whether the driver supports a **modifier** in combination with a
+**format**, and whether it is only supported with "external" texture targets.
+If the combination is supported in any fashion, true is returned.  If the
+**external_only** parameter is not NULL, the bool it points to is set to
+false if non-external texture targets are supported with the specified modifier+
+format, or true if only external texture targets are supported.
+
+
+get_dmabuf_modifier_planes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Query the number of planes required by the image layout specified by the
+**modifier** and **format** parameters.  The value returned includes both planes
+dictated by **format** and any additional planes required for driver-specific
+auxiliary data necessary for the layout defined by **modifier**.
+If the proc is NULL, no auxiliary planes are required for any layout supported by
+**screen** and the number of planes can be derived directly from **format**.
 
 
 Thread safety

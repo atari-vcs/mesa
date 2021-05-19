@@ -247,7 +247,7 @@ descriptor=[
   [ "TEXTURE_COORD_ARRAY_BUFFER_BINDING_ARB", "LOC_CUSTOM, TYPE_INT, NO_OFFSET, NO_EXTRA" ],
 
 # GL_OES_point_sprite
-  [ "POINT_SPRITE_NV", "CONTEXT_BOOL(Point.PointSprite), extra_NV_point_sprite_ARB_point_sprite" ],
+  [ "POINT_SPRITE", "CONTEXT_BOOL(Point.PointSprite), extra_ARB_point_sprite" ],
 ]},
 
 
@@ -701,7 +701,7 @@ descriptor=[
   [ "ALPHA_SCALE", "CONTEXT_FLOAT(Pixel.AlphaScale), NO_EXTRA" ],
   [ "ATTRIB_STACK_DEPTH", "CONTEXT_INT(AttribStackDepth), NO_EXTRA" ],
   [ "AUTO_NORMAL", "CONTEXT_BOOL(Eval.AutoNormal), NO_EXTRA" ],
-  [ "AUX_BUFFERS", "BUFFER_INT(Visual.numAuxBuffers), NO_EXTRA" ],
+  [ "AUX_BUFFERS", "CONST(0), NO_EXTRA" ],
   [ "BLUE_BIAS", "CONTEXT_FLOAT(Pixel.BlueBias), NO_EXTRA" ],
   [ "BLUE_SCALE", "CONTEXT_FLOAT(Pixel.BlueScale), NO_EXTRA" ],
   [ "CLIENT_ATTRIB_STACK_DEPTH", "CONTEXT_INT(ClientAttribStackDepth), NO_EXTRA" ],
@@ -867,9 +867,8 @@ descriptor=[
 # GL_IBM_rasterpos_clip
   [ "RASTER_POSITION_UNCLIPPED_IBM", "CONTEXT_BOOL(Transform.RasterPositionUnclipped), NO_EXTRA" ],
 
-# GL_NV_point_sprite
-  [ "POINT_SPRITE_R_MODE_NV", "CONTEXT_ENUM16(Point.SpriteRMode), extra_NV_point_sprite" ],
-  [ "POINT_SPRITE_COORD_ORIGIN", "CONTEXT_ENUM16(Point.SpriteOrigin), extra_NV_point_sprite_ARB_point_sprite" ],
+# GL_ARB_point_sprite
+  [ "POINT_SPRITE_COORD_ORIGIN", "CONTEXT_ENUM16(Point.SpriteOrigin), extra_ARB_point_sprite" ],
 
 # GL_NV_texture_rectangle
   [ "TEXTURE_RECTANGLE_NV", "LOC_CUSTOM, TYPE_BOOLEAN, 0, extra_NV_texture_rectangle" ],

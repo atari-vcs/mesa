@@ -314,6 +314,9 @@ files_libgallium = files(
   'util/u_texture.h',
   'util/u_tile.c',
   'util/u_tile.h',
+  'util/u_trace.c',
+  'util/u_trace.h',
+  'util/u_trace_priv.h',
   'util/u_transfer.c',
   'util/u_transfer.h',
   'util/u_transfer_helper.c',
@@ -342,7 +345,7 @@ if dep_libdrm.found()
   )
 endif
 
-if with_llvm
+if draw_with_llvm
   files_libgallium += files(
     'gallivm/lp_bld_arit.c',
     'gallivm/lp_bld_arit.h',
@@ -480,6 +483,38 @@ if with_dri2 and with_platform_x11
   endif
 endif
 
+u_trace_py = files('util/u_trace.py')
+
+files_libgallium += custom_target(
+  'u_tracepoints.c',
+  input: 'util/u_tracepoints.py',
+  output: 'u_tracepoints.c',
+  command: [
+    prog_python, '@INPUT@',
+    '-p', join_paths(meson.source_root(), 'src/gallium/auxiliary/util/'),
+    '-C', '@OUTPUT@',
+  ],
+  depend_files: u_trace_py,
+)
+
+files_u_tracepoints = custom_target(
+  'u_tracepoints.h',
+  input: 'util/u_tracepoints.py',
+  output: 'u_tracepoints.h',
+  command: [
+    prog_python, '@INPUT@',
+    '-p', join_paths(meson.source_root(), 'src/gallium/auxiliary/util/'),
+    '-H', '@OUTPUT@',
+  ],
+  depend_files: u_trace_py,
+)
+
+files_libgallium += files_u_tracepoints
+
+idep_u_tracepoints = declare_dependency(
+  sources: files_u_tracepoints,
+)
+
 u_indices_gen_c = custom_target(
   'u_indices_gen.c',
   input : 'indices/u_indices_gen.py',
@@ -496,17 +531,21 @@ u_unfilled_gen_c = custom_target(
   capture : true,
 )
 
+libgallium_extra_c_args = []
+if with_swrast_vk and with_gallium_zink
+  libgallium_extra_c_args += '-DZINK_WITH_SWRAST_VK'
+endif
 libgallium = static_library(
   'gallium',
   [files_libgallium, u_indices_gen_c, u_unfilled_gen_c],
   include_directories : [
     inc_loader, inc_gallium, inc_src, inc_include, include_directories('util')
   ],
-  c_args : [c_msvc_compat_args],
+  c_args : [c_msvc_compat_args, libgallium_extra_c_args],
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   dependencies : [
-    dep_libdrm, dep_llvm, dep_dl, dep_m, dep_thread, dep_lmsensors,
+    dep_libdrm, dep_llvm, dep_dl, dep_m, dep_thread, dep_lmsensors, dep_ws2_32,
     idep_nir, idep_nir_headers, idep_mesautil,
   ],
   build_by_default : false
@@ -519,6 +558,7 @@ libgalliumvl_stub = static_library(
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   include_directories: [inc_gallium, inc_include, inc_src],
+  dependencies : idep_mesautil,
   build_by_default : false,
 )
 
@@ -529,6 +569,7 @@ libgalliumvl = static_library(
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   include_directories : [inc_gallium, inc_include, inc_src],
+  dependencies : idep_mesautil,
   build_by_default : false,
 )
 
@@ -537,6 +578,6 @@ libgalliumvlwinsys = static_library(
   'galliumvlwinsys',
   files_libgalliumvlwinsys,
   include_directories : [inc_gallium, inc_include, inc_loader, inc_src],
-  dependencies : [dep_libdrm, vlwinsys_deps],
+  dependencies : [dep_libdrm, vlwinsys_deps, idep_mesautil],
   build_by_default : false,
 )

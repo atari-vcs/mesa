@@ -1259,7 +1259,16 @@ void
 nvc0_selpFlip(const FixupEntry *entry, uint32_t *code, const FixupData& data)
 {
    int loc = entry->loc;
-   if (data.force_persample_interp)
+   bool val = false;
+   switch (entry->ipa) {
+   case 0:
+      val = data.force_persample_interp;
+      break;
+   case 1:
+      val = data.msaa;
+      break;
+   }
+   if (val)
       code[loc + 1] |= 1 << 20;
    else
       code[loc + 1] &= ~(1 << 20);
@@ -1272,8 +1281,8 @@ void CodeEmitterNVC0::emitSELP(const Instruction *i)
    if (i->src(2).mod & Modifier(NV50_IR_MOD_NOT))
       code[1] |= 1 << 20;
 
-   if (i->subOp == 1) {
-      addInterp(0, 0, nvc0_selpFlip);
+   if (i->subOp >= 1) {
+      addInterp(i->subOp - 1, 0, nvc0_selpFlip);
    }
 }
 
@@ -3013,7 +3022,8 @@ CodeEmitterNVC0::getMinEncodingSize(const Instruction *i) const
 class SchedDataCalculator : public Pass
 {
 public:
-   SchedDataCalculator(const Target *targ) : targ(targ) { }
+   SchedDataCalculator(const Target *targ) : score(NULL), prevData(0),
+      prevOp(OP_NOP), targ(targ) { }
 
 private:
    struct RegScores

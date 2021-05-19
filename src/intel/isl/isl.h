@@ -53,18 +53,20 @@ extern "C" {
 struct gen_device_info;
 struct brw_image_param;
 
-#ifndef ISL_DEV_GEN
+#ifndef ISL_GFX_VER
 /**
  * @brief Get the hardware generation of isl_device.
  *
  * You can define this as a compile-time constant in the CFLAGS. For example,
- * `gcc -DISL_DEV_GEN(dev)=9 ...`.
+ * `gcc -DISL_GFX_VER(dev)=9 ...`.
  */
-#define ISL_DEV_GEN(__dev) ((__dev)->info->gen)
-#define ISL_DEV_GEN_SANITIZE(__dev)
+#define ISL_GFX_VER(__dev) ((__dev)->info->ver)
+#define ISL_GFX_VERX10(__dev) ((__dev)->info->verx10)
+#define ISL_GFX_VER_SANITIZE(__dev)
 #else
-#define ISL_DEV_GEN_SANITIZE(__dev) \
-   (assert(ISL_DEV_GEN(__dev) == (__dev)->info->gen))
+#define ISL_GFX_VER_SANITIZE(__dev) \
+   (assert(ISL_GFX_VER(__dev) == (__dev)->info->ver) && \
+           ISL_GFX_VERX10(__dev) == (__dev)->info->verx10))
 #endif
 
 #ifndef ISL_DEV_IS_G4X
@@ -76,7 +78,7 @@ struct brw_image_param;
  * @brief Get the hardware generation of isl_device.
  *
  * You can define this as a compile-time constant in the CFLAGS. For example,
- * `gcc -DISL_DEV_GEN(dev)=9 ...`.
+ * `gcc -DISL_GFX_VER(dev)=9 ...`.
  */
 #define ISL_DEV_IS_HASWELL(__dev) ((__dev)->info->is_haswell)
 #endif
@@ -386,20 +388,20 @@ enum isl_format {
    ISL_FORMAT_MCS_4X,
    ISL_FORMAT_MCS_8X,
    ISL_FORMAT_MCS_16X,
-   ISL_FORMAT_GEN7_CCS_32BPP_X,
-   ISL_FORMAT_GEN7_CCS_64BPP_X,
-   ISL_FORMAT_GEN7_CCS_128BPP_X,
-   ISL_FORMAT_GEN7_CCS_32BPP_Y,
-   ISL_FORMAT_GEN7_CCS_64BPP_Y,
-   ISL_FORMAT_GEN7_CCS_128BPP_Y,
-   ISL_FORMAT_GEN9_CCS_32BPP,
-   ISL_FORMAT_GEN9_CCS_64BPP,
-   ISL_FORMAT_GEN9_CCS_128BPP,
-   ISL_FORMAT_GEN12_CCS_8BPP_Y0,
-   ISL_FORMAT_GEN12_CCS_16BPP_Y0,
-   ISL_FORMAT_GEN12_CCS_32BPP_Y0,
-   ISL_FORMAT_GEN12_CCS_64BPP_Y0,
-   ISL_FORMAT_GEN12_CCS_128BPP_Y0,
+   ISL_FORMAT_GFX7_CCS_32BPP_X,
+   ISL_FORMAT_GFX7_CCS_64BPP_X,
+   ISL_FORMAT_GFX7_CCS_128BPP_X,
+   ISL_FORMAT_GFX7_CCS_32BPP_Y,
+   ISL_FORMAT_GFX7_CCS_64BPP_Y,
+   ISL_FORMAT_GFX7_CCS_128BPP_Y,
+   ISL_FORMAT_GFX9_CCS_32BPP,
+   ISL_FORMAT_GFX9_CCS_64BPP,
+   ISL_FORMAT_GFX9_CCS_128BPP,
+   ISL_FORMAT_GFX12_CCS_8BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_16BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_32BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_64BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_128BPP_Y0,
 
    /* An upper bound on the supported format enumerations */
    ISL_NUM_FORMATS,
@@ -476,7 +478,7 @@ enum isl_tiling {
    ISL_TILING_Ys, /**< Standard 64K tiling. The 's' means "sixty-four". */
    ISL_TILING_HIZ, /**< Tiling format for HiZ surfaces */
    ISL_TILING_CCS, /**< Tiling format for CCS surfaces */
-   ISL_TILING_GEN12_CCS, /**< Tiling format for Gen12 CCS surfaces */
+   ISL_TILING_GFX12_CCS, /**< Tiling format for Gfx12 CCS surfaces */
 };
 
 /**
@@ -492,7 +494,7 @@ typedef uint32_t isl_tiling_flags_t;
 #define ISL_TILING_Ys_BIT                 (1u << ISL_TILING_Ys)
 #define ISL_TILING_HIZ_BIT                (1u << ISL_TILING_HIZ)
 #define ISL_TILING_CCS_BIT                (1u << ISL_TILING_CCS)
-#define ISL_TILING_GEN12_CCS_BIT          (1u << ISL_TILING_GEN12_CCS)
+#define ISL_TILING_GFX12_CCS_BIT          (1u << ISL_TILING_GFX12_CCS)
 #define ISL_TILING_ANY_MASK               (~0u)
 #define ISL_TILING_NON_LINEAR_MASK        (~ISL_TILING_LINEAR_BIT)
 
@@ -534,7 +536,7 @@ enum isl_dim_layout {
     *
     * @invariant isl_surf::phys_level0_sa::depth == 1
     */
-   ISL_DIM_LAYOUT_GEN4_2D,
+   ISL_DIM_LAYOUT_GFX4_2D,
 
    /**
     * For details, see the G35 PRM >> Volume 1: Graphics Core >> Section
@@ -542,12 +544,12 @@ enum isl_dim_layout {
     *
     * @invariant isl_surf::phys_level0_sa::array_len == 1
     */
-   ISL_DIM_LAYOUT_GEN4_3D,
+   ISL_DIM_LAYOUT_GFX4_3D,
 
    /**
     * Special layout used for HiZ and stencil on Sandy Bridge to work around
-    * the hardware's lack of mipmap support.  On gen6, HiZ and stencil buffers
-    * work the same as on gen7+ except that they don't technically support
+    * the hardware's lack of mipmap support.  On gfx6, HiZ and stencil buffers
+    * work the same as on gfx7+ except that they don't technically support
     * mipmapping.  That does not, however, stop us from doing it.  As far as
     * Sandy Bridge hardware is concerned, HiZ and stencil always operates on a
     * single miplevel 2D (possibly array) image.  The dimensions of that image
@@ -582,13 +584,13 @@ enum isl_dim_layout {
     *   |    | +-+
     *   +----+
     */
-   ISL_DIM_LAYOUT_GEN6_STENCIL_HIZ,
+   ISL_DIM_LAYOUT_GFX6_STENCIL_HIZ,
 
    /**
     * For details, see the Skylake BSpec >> Memory Views >> Common Surface
     * Formats >> Surface Layout and Tiling >> » 1D Surfaces.
     */
-   ISL_DIM_LAYOUT_GEN9_1D,
+   ISL_DIM_LAYOUT_GFX9_1D,
 };
 
 enum isl_aux_usage {
@@ -617,11 +619,11 @@ enum isl_aux_usage {
    ISL_AUX_USAGE_CCS_E,
 
    /** The auxiliary surface provides full lossless color compression on
-    *  Gen12.
+    *  Gfx12.
     *
     * @invariant isl_surf::samples == 1
     */
-   ISL_AUX_USAGE_GEN12_CCS_E,
+   ISL_AUX_USAGE_GFX12_CCS_E,
 
    /** The auxiliary surface provides full lossless media color compression
     *
@@ -658,7 +660,7 @@ enum isl_aux_usage {
    /** The auxiliary surface is an MCS and CCS is also enabled
     *
     * In this mode, we have fused MCS+CCS compression where the MCS is used
-    * for fast-clears and "identical samples" compression just like on Gen7-11
+    * for fast-clears and "identical samples" compression just like on Gfx7-11
     * but each plane is then CCS compressed.
     *
     * @invariant isl_surf::samples > 1
@@ -1133,6 +1135,9 @@ struct isl_format_layout {
       struct isl_channel_layout channels_array[7];
    };
 
+   /** Set if all channels have the same isl_base_type. Otherwise, ISL_BASE_VOID. */
+   enum isl_base_type uniform_channel_type;
+
    enum isl_colorspace colorspace;
    enum isl_txc txc;
 };
@@ -1413,7 +1418,7 @@ struct isl_surf_fill_state_info {
    uint64_t clear_address;
 
    /**
-    * Surface write disables for gen4-5
+    * Surface write disables for gfx4-5
     */
    isl_channel_mask_t write_disables;
 
@@ -1823,7 +1828,7 @@ isl_aux_usage_has_ccs(enum isl_aux_usage usage)
 {
    return usage == ISL_AUX_USAGE_CCS_D ||
           usage == ISL_AUX_USAGE_CCS_E ||
-          usage == ISL_AUX_USAGE_GEN12_CCS_E ||
+          usage == ISL_AUX_USAGE_GFX12_CCS_E ||
           usage == ISL_AUX_USAGE_MC ||
           usage == ISL_AUX_USAGE_HIZ_CCS_WT ||
           usage == ISL_AUX_USAGE_HIZ_CCS ||
@@ -1844,6 +1849,13 @@ isl_aux_state_has_valid_aux(enum isl_aux_state state)
 {
    return state != ISL_AUX_STATE_AUX_INVALID;
 }
+
+extern const struct isl_drm_modifier_info isl_drm_modifier_info_list[];
+
+#define isl_drm_modifier_info_for_each(__info) \
+   for (const struct isl_drm_modifier_info *__info = isl_drm_modifier_info_list; \
+        __info->modifier != DRM_FORMAT_MOD_INVALID; \
+        ++__info)
 
 const struct isl_drm_modifier_info * ATTRIBUTE_CONST
 isl_drm_modifier_get_info(uint64_t modifier);
@@ -1886,11 +1898,23 @@ isl_drm_modifier_get_default_aux_state(uint64_t modifier)
       return ISL_AUX_STATE_AUX_INVALID;
 
    assert(mod_info->aux_usage == ISL_AUX_USAGE_CCS_E ||
-          mod_info->aux_usage == ISL_AUX_USAGE_GEN12_CCS_E ||
+          mod_info->aux_usage == ISL_AUX_USAGE_GFX12_CCS_E ||
           mod_info->aux_usage == ISL_AUX_USAGE_MC);
    return mod_info->supports_clear_color ? ISL_AUX_STATE_COMPRESSED_CLEAR :
                                            ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
 }
+
+/**
+ * Return the modifier's score, which indicates the driver's preference for the
+ * modifier relative to others. A higher score is better. Zero means
+ * unsupported.
+ *
+ * Intended to assist selection of a modifier from an externally provided list,
+ * such as VkImageDrmFormatModifierListCreateInfoEXT.
+ */
+uint32_t
+isl_drm_modifier_get_score(const struct gen_device_info *devinfo,
+                           uint64_t modifier);
 
 struct isl_extent2d ATTRIBUTE_CONST
 isl_get_interleaved_msaa_px_size_sa(uint32_t samples);
@@ -2001,7 +2025,8 @@ isl_swizzle_compose(struct isl_swizzle first, struct isl_swizzle second);
 struct isl_swizzle
 isl_swizzle_invert(struct isl_swizzle swizzle);
 
-uint32_t isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage);
+uint32_t isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage,
+                  bool external);
 
 #define isl_surf_init(dev, surf, ...) \
    isl_surf_init_s((dev), (surf), \
@@ -2370,6 +2395,48 @@ isl_memcpy_tiled_to_linear(uint32_t xt1, uint32_t xt2,
                            enum isl_tiling tiling,
                            isl_memcpy_type copy_type);
 
+/**
+ * @brief computes the tile_w (in bytes) and tile_h (in rows) of
+ * different tiling patterns.
+ */
+static inline void
+isl_get_tile_dims(enum isl_tiling tiling, uint32_t cpp,
+                  uint32_t *tile_w, uint32_t *tile_h)
+{
+   switch (tiling) {
+   case ISL_TILING_X:
+      *tile_w = 512;
+      *tile_h = 8;
+      break;
+   case ISL_TILING_Y0:
+      *tile_w = 128;
+      *tile_h = 32;
+      break;
+   case ISL_TILING_LINEAR:
+      *tile_w = cpp;
+      *tile_h = 1;
+      break;
+   default:
+      unreachable("not reached");
+   }
+}
+
+/**
+ * @brief Computes masks that may be used to select the bits of the X
+ * and Y coordinates that indicate the offset within a tile.  If the BO is
+ * untiled, the masks are set to 0.
+ */
+static inline void
+isl_get_tile_masks(enum isl_tiling tiling, uint32_t cpp,
+                   uint32_t *mask_x, uint32_t *mask_y)
+{
+   uint32_t tile_w_bytes, tile_h;
+
+   isl_get_tile_dims(tiling, cpp, &tile_w_bytes, &tile_h);
+
+   *mask_x = tile_w_bytes / cpp - 1;
+   *mask_y = tile_h - 1;
+}
 #ifdef __cplusplus
 }
 #endif

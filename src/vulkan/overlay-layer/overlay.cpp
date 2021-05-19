@@ -43,11 +43,13 @@
 #include "util/simple_mtx.h"
 
 #include "vk_enum_to_str.h"
+#include "vk_dispatch_table.h"
 #include "vk_util.h"
 
 /* Mapped from VkInstace/VkPhysicalDevice */
 struct instance_data {
    struct vk_instance_dispatch_table vtable;
+   struct vk_physical_device_dispatch_table pd_vtable;
    VkInstance instance;
 
    struct overlay_params params;
@@ -419,14 +421,14 @@ static void device_map_queues(struct device_data *data,
 
    struct instance_data *instance_data = data->instance;
    uint32_t n_family_props;
-   instance_data->vtable.GetPhysicalDeviceQueueFamilyProperties(data->physical_device,
-                                                                &n_family_props,
-                                                                NULL);
+   instance_data->pd_vtable.GetPhysicalDeviceQueueFamilyProperties(data->physical_device,
+                                                                   &n_family_props,
+                                                                   NULL);
    VkQueueFamilyProperties *family_props =
       (VkQueueFamilyProperties *)malloc(sizeof(VkQueueFamilyProperties) * n_family_props);
-   instance_data->vtable.GetPhysicalDeviceQueueFamilyProperties(data->physical_device,
-                                                                &n_family_props,
-                                                                family_props);
+   instance_data->pd_vtable.GetPhysicalDeviceQueueFamilyProperties(data->physical_device,
+                                                                   &n_family_props,
+                                                                   family_props);
 
    uint32_t queue_index = 0;
    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
@@ -928,12 +930,16 @@ static void compute_swapchain_display(struct swapchain_data *data)
    ImGui::NewFrame();
    position_layer(data);
    ImGui::Begin("Mesa overlay");
-   ImGui::Text("Device: %s", device_data->properties.deviceName);
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_device])
+      ImGui::Text("Device: %s", device_data->properties.deviceName);
 
-   const char *format_name = vk_Format_to_str(data->format);
-   format_name = format_name ? (format_name + strlen("VK_FORMAT_")) : "unknown";
-   ImGui::Text("Swapchain format: %s", format_name);
-   ImGui::Text("Frames: %" PRIu64, data->n_frames);
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_format]) {
+      const char *format_name = vk_Format_to_str(data->format);
+      format_name = format_name ? (format_name + strlen("VK_FORMAT_")) : "unknown";
+      ImGui::Text("Swapchain format: %s", format_name);
+   }
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_frame])
+      ImGui::Text("Frames: %" PRIu64, data->n_frames);
    if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_fps])
       ImGui::Text("FPS: %.2f" , data->fps);
 
@@ -1003,7 +1009,7 @@ static uint32_t vk_memory_type(struct device_data *data,
                                uint32_t type_bits)
 {
     VkPhysicalDeviceMemoryProperties prop;
-    data->instance->vtable.GetPhysicalDeviceMemoryProperties(data->physical_device, &prop);
+    data->instance->pd_vtable.GetPhysicalDeviceMemoryProperties(data->physical_device, &prop);
     for (uint32_t i = 0; i < prop.memoryTypeCount; i++)
         if ((prop.memoryTypes[i].propertyFlags & properties) == properties && type_bits & (1<<i))
             return i;
@@ -1326,7 +1332,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
    if (device_data->graphic_queue->family_index != present_queue->family_index)
    {
       /* Transfer the image back to the present queue family
-       * image layout was already changed to present by the render pass 
+       * image layout was already changed to present by the render pass
        */
       imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
       imb.pNext = nullptr;
@@ -2495,10 +2501,11 @@ static VkResult overlay_CreateDevice(
 
    struct device_data *device_data = new_device_data(*pDevice, instance_data);
    device_data->physical_device = physicalDevice;
-   vk_load_device_commands(*pDevice, fpGetDeviceProcAddr, &device_data->vtable);
+   vk_device_dispatch_table_load(&device_data->vtable,
+                                 fpGetDeviceProcAddr, *pDevice);
 
-   instance_data->vtable.GetPhysicalDeviceProperties(device_data->physical_device,
-                                                     &device_data->properties);
+   instance_data->pd_vtable.GetPhysicalDeviceProperties(device_data->physical_device,
+                                                        &device_data->properties);
 
    VkLayerDeviceCreateInfo *load_data_info =
       get_device_chain_info(pCreateInfo, VK_LOADER_DATA_CALLBACK);
@@ -2543,9 +2550,12 @@ static VkResult overlay_CreateInstance(
    if (result != VK_SUCCESS) return result;
 
    struct instance_data *instance_data = new_instance_data(*pInstance);
-   vk_load_instance_commands(instance_data->instance,
-                             fpGetInstanceProcAddr,
-                             &instance_data->vtable);
+   vk_instance_dispatch_table_load(&instance_data->vtable,
+                                   fpGetInstanceProcAddr,
+                                   instance_data->instance);
+   vk_physical_device_dispatch_table_load(&instance_data->pd_vtable,
+                                          fpGetInstanceProcAddr,
+                                          instance_data->instance);
    instance_data_map_physical_devices(instance_data, true);
 
    parse_overlay_env(&instance_data->params, getenv("VK_LAYER_MESA_OVERLAY_CONFIG"));

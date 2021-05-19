@@ -1882,6 +1882,9 @@ _mesa_enable_vertex_array_attribs(struct gl_context *ctx,
       /* Update the map mode if needed */
       if (attrib_bits & (VERT_BIT_POS|VERT_BIT_GENERIC0))
          update_attribute_map_mode(ctx, vao);
+
+      vao->_EnabledWithMapMode =
+         _mesa_vao_enable_to_vp_inputs(vao->_AttributeMapMode, vao->Enabled);
    }
 }
 
@@ -1979,6 +1982,9 @@ _mesa_disable_vertex_array_attribs(struct gl_context *ctx,
       /* Update the map mode if needed */
       if (attrib_bits & (VERT_BIT_POS|VERT_BIT_GENERIC0))
          update_attribute_map_mode(ctx, vao);
+
+      vao->_EnabledWithMapMode =
+         _mesa_vao_enable_to_vp_inputs(vao->_AttributeMapMode, vao->Enabled);
    }
 }
 
@@ -3130,7 +3136,8 @@ vertex_array_vertex_buffers(struct gl_context *ctx,
     *       their parameters are valid and no other error occurs."
     */
 
-   _mesa_HashLockMutex(ctx->Shared->BufferObjects);
+   _mesa_HashLockMaybeLocked(ctx->Shared->BufferObjects,
+                             ctx->BufferObjectsLocked);
 
    for (i = 0; i < count; i++) {
       struct gl_buffer_object *vbo;
@@ -3187,7 +3194,8 @@ vertex_array_vertex_buffers(struct gl_context *ctx,
                                vbo, offsets[i], strides[i], false, false);
    }
 
-   _mesa_HashUnlockMutex(ctx->Shared->BufferObjects);
+   _mesa_HashUnlockMaybeLocked(ctx->Shared->BufferObjects,
+                               ctx->BufferObjectsLocked);
 }
 
 

@@ -207,7 +207,7 @@ gcm_pin_instructions(nir_function_impl *impl, struct gcm_state *state)
                   instr->pass_flags = GCM_INSTR_PINNED;
                   break;
                }
-               /* fallthrough */
+               FALLTHROUGH;
 
             default:
                instr->pass_flags = 0;
@@ -509,14 +509,14 @@ gcm_replace_def_with_undef(nir_ssa_def *def, void *void_state)
 {
    struct gcm_state *state = void_state;
 
-   if (list_is_empty(&def->uses) && list_is_empty(&def->if_uses))
+   if (nir_ssa_def_is_unused(def))
       return true;
 
    nir_ssa_undef_instr *undef =
       nir_ssa_undef_instr_create(state->impl->function->shader,
                                  def->num_components, def->bit_size);
    nir_instr_insert(nir_before_cf_list(&state->impl->body), &undef->instr);
-   nir_ssa_def_rewrite_uses(def, nir_src_for_ssa(&undef->def));
+   nir_ssa_def_rewrite_uses(def, &undef->def);
 
    return true;
 }

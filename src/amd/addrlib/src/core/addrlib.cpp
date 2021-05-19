@@ -107,6 +107,8 @@ Lib::Lib() :
     m_rowSize(0),
     m_minPitchAlignPixels(1),
     m_maxSamples(8),
+    m_maxBaseAlign(0),
+    m_maxMetaBaseAlign(0),
     m_pElemLib(NULL)
 {
     m_configFlags.value = 0;
@@ -132,6 +134,8 @@ Lib::Lib(const Client* pClient) :
     m_rowSize(0),
     m_minPitchAlignPixels(1),
     m_maxSamples(8),
+    m_maxBaseAlign(0),
+    m_maxMetaBaseAlign(0),
     m_pElemLib(NULL)
 {
     m_configFlags.value = 0;
@@ -205,7 +209,7 @@ ADDR_E_RETURNCODE Lib::Create(
                         pLib = SiHwlInit(&client);
                         break;
                     case FAMILY_VI:
-                    case FAMILY_CZ:
+                    case FAMILY_CZ: // VI based fusion
                     case FAMILY_CI:
                     case FAMILY_KV: // CI based fusion
                         pLib = CiHwlInit(&client);

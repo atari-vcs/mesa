@@ -31,7 +31,6 @@
 #include "pan_pool.h"
 #include "pan_minmax_cache.h"
 #include "pan_texture.h"
-#include "pan_partial_update.h"
 #include "drm-uapi/drm.h"
 #include "util/u_range.h"
 
@@ -41,36 +40,31 @@ struct panfrost_resource {
         struct pipe_resource base;
         struct {
                 struct pipe_scissor_state extent;
-                struct pan_rect *inverted_rects;
-                unsigned inverted_len;
+                struct {
+                        bool enable;
+                        unsigned stride;
+                        unsigned size;
+                        BITSET_WORD *data;
+                } tile_map;
         } damage;
 
-        struct panfrost_bo *bo;
         struct renderonly_scanout *scanout;
 
         struct panfrost_resource *separate_stencil;
 
         struct util_range valid_buffer_range;
 
-        /* Description of the mip levels */
-        struct panfrost_slice slices[MAX_MIP_LEVELS];
+        /* Description of the resource layout */
+        struct pan_image image;
 
-        /* Distance from tree to tree */
-        unsigned cubemap_stride;
-
-        /* DRM fourcc code: linear, 16x16 u-interleaved, AFBC */
-        uint64_t modifier;
+        /* Image state */
+        struct pan_image_state state;
 
         /* Whether the modifier can be changed */
         bool modifier_constant;
 
-        /* Is transaciton elimination enabled? */
-        bool checksummed;
-
         /* Used to decide when to convert to another modifier */
         uint16_t modifier_updates;
-
-        enum pipe_format internal_format;
 
         /* Cached min/max values for index buffers */
         struct panfrost_minmax_cache *index_cache;
@@ -98,9 +92,14 @@ pan_transfer(struct pipe_transfer *p)
 }
 
 mali_ptr
-panfrost_get_texture_address(
-        struct panfrost_resource *rsrc,
-        unsigned level, unsigned face, unsigned sample);
+panfrost_get_texture_address(struct panfrost_resource *rsrc,
+                             unsigned level, unsigned layer,
+                             unsigned sample);
+
+void
+panfrost_get_afbc_pointers(struct panfrost_resource *rsrc,
+                           unsigned level, unsigned layer,
+                           mali_ptr *header, mali_ptr *body);
 
 void panfrost_resource_screen_init(struct pipe_screen *screen);
 
@@ -144,5 +143,9 @@ panfrost_translate_texture_dimension(enum pipe_texture_target t) {
         }
 }
 
+void
+pan_resource_modifier_convert(struct panfrost_context *ctx,
+                              struct panfrost_resource *rsrc,
+                              uint64_t modifier);
 
 #endif /* PAN_RESOURCE_H */

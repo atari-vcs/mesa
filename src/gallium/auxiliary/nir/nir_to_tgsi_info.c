@@ -351,7 +351,7 @@ static void scan_instruction(const struct nir_shader *nir,
                if (glsl_base_type_is_integer(base_type))
                   break;
 
-               /* fall-through */
+               FALLTHROUGH;
             case INTERP_MODE_SMOOTH:
                if (var->data.sample)
                   info->uses_persp_sample = true;
@@ -551,7 +551,7 @@ void nir_tgsi_scan_shader(const struct nir_shader *nir,
                info->input_interpolate[i] = TGSI_INTERPOLATE_COLOR;
                break;
             }
-            /* fall-through */
+            FALLTHROUGH;
 
          case INTERP_MODE_SMOOTH:
             assert(!glsl_base_type_is_integer(base_type));
@@ -801,9 +801,9 @@ void nir_tgsi_scan_shader(const struct nir_shader *nir,
    info->samplers_declared = sampler_mask;
 
    info->file_max[TGSI_FILE_SAMPLER] = util_last_bit(info->samplers_declared) - 1;
-   info->file_max[TGSI_FILE_SAMPLER_VIEW] = util_last_bit(nir->info.textures_used) - 1;
+   info->file_max[TGSI_FILE_SAMPLER_VIEW] = BITSET_LAST_BIT(nir->info.textures_used) - 1;
    info->file_mask[TGSI_FILE_SAMPLER] = info->samplers_declared;
-   info->file_mask[TGSI_FILE_SAMPLER_VIEW] = nir->info.textures_used;
+   info->file_mask[TGSI_FILE_SAMPLER_VIEW] = nir->info.textures_used[0];
    info->file_max[TGSI_FILE_IMAGE] = util_last_bit(info->images_declared) - 1;
    info->file_mask[TGSI_FILE_IMAGE] = info->images_declared;
 

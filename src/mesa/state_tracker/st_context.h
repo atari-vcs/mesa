@@ -55,6 +55,7 @@ struct st_program;
 struct st_perf_monitor_group;
 struct u_upload_mgr;
 
+#define ST_L3_PINNING_DISABLED 0xffffffff
 
 struct st_bitmap_cache
 {
@@ -123,13 +124,17 @@ struct st_context
    struct st_context_iface iface;
 
    struct gl_context *ctx;
-
+   struct pipe_screen *screen;
    struct pipe_context *pipe;
+   struct cso_context *cso_context;
 
    struct draw_context *draw;  /**< For selection/feedback/rastpos only */
    struct draw_stage *feedback_stage;  /**< For GL_FEEDBACK rendermode */
    struct draw_stage *selection_stage;  /**< For GL_SELECT rendermode */
    struct draw_stage *rastpos_stage;  /**< For glRasterPos */
+
+   unsigned pin_thread_counter; /* for L3 thread pinning on AMD Zen */
+
    GLboolean clamp_frag_color_in_shader;
    GLboolean clamp_vert_color_in_shader;
    boolean clamp_frag_depth_in_shader;
@@ -137,6 +142,7 @@ struct st_context
    boolean has_time_elapsed;
    boolean has_etc1;
    boolean has_etc2;
+   boolean transcode_etc;
    boolean has_astc_2d_ldr;
    boolean has_astc_5x5_ldr;
    boolean prefer_blit_based_texture_transfer;
@@ -153,6 +159,10 @@ struct st_context
    boolean lower_point_size;
    boolean lower_two_sided_color;
    boolean lower_ucp;
+   boolean prefer_real_buffer_in_constbuf0;
+   boolean has_conditional_render;
+   boolean lower_texcoord_replace;
+   boolean lower_rect_tex;
 
    /* There are consequences for drivers wanting to call st_finalize_nir
     * twice, once before shader caching and once after lowering for shader
@@ -174,6 +184,8 @@ struct st_context
 
    boolean needs_texcoord_semantic;
    boolean apply_texture_swizzle_to_border_color;
+   boolean emulate_gl_clamp;
+   boolean texture_buffer_sampler;
 
    /* On old libGL's for linux we need to invalidate the drawables
     * on glViewpport calls, this is set via a option.
@@ -200,11 +212,9 @@ struct st_context
       struct pipe_sampler_view *vert_sampler_views[PIPE_MAX_SAMPLERS];
       struct pipe_sampler_view *frag_sampler_views[PIPE_MAX_SAMPLERS];
       GLuint num_sampler_views[PIPE_SHADER_TYPES];
+      unsigned num_images[PIPE_SHADER_TYPES];
       struct pipe_clip_state clip;
-      struct {
-         void *ptr;
-         unsigned size;
-      } constants[PIPE_SHADER_TYPES];
+      unsigned constbuf0_enabled_shader_mask;
       unsigned fb_width;
       unsigned fb_height;
       unsigned fb_num_samples;
@@ -234,8 +244,6 @@ struct st_context
 
    /** This masks out unused shader resources. Only valid in draw calls. */
    uint64_t active_states;
-
-   unsigned pin_thread_counter; /* for L3 thread pinning on AMD Zen */
 
    /* If true, further analysis of states is required to know if something
     * has changed. Used mainly for shaders.
@@ -334,8 +342,6 @@ struct st_context
 
    enum pipe_texture_target internal_target;
 
-   struct cso_context *cso_context;
-
    void *winsys_drawable_handle;
 
    /* The number of vertex buffers from the last call of validate_arrays. */
@@ -376,7 +382,6 @@ struct st_context
       struct st_zombie_shader_node list;
       simple_mtx_t mutex;
    } zombie_shaders;
-
 };
 
 

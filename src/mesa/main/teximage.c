@@ -42,6 +42,7 @@
 #include "macros.h"
 #include "mipmap.h"
 #include "multisample.h"
+#include "pixel.h"
 #include "pixelstore.h"
 #include "state.h"
 #include "texcompress.h"
@@ -1492,6 +1493,7 @@ _mesa_target_can_be_compressed(const struct gl_context *ctx, GLenum target,
       default:
          break;
       }
+      FALLTHROUGH;
    default:
       break;
    }
@@ -2744,9 +2746,9 @@ static inline void
 check_gen_mipmap(struct gl_context *ctx, GLenum target,
                  struct gl_texture_object *texObj, GLint level)
 {
-   if (texObj->GenerateMipmap &&
-       level == texObj->BaseLevel &&
-       level < texObj->MaxLevel) {
+   if (texObj->Attrib.GenerateMipmap &&
+       level == texObj->Attrib.BaseLevel &&
+       level < texObj->Attrib.MaxLevel) {
       assert(ctx->Driver.GenerateMipmap);
       ctx->Driver.GenerateMipmap(ctx, target, texObj);
    }
@@ -2967,7 +2969,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
    mesa_format texFormat;
    bool dimensionsOK = true, sizeOK = true;
 
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
       if (compressed)
@@ -3126,7 +3128,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
       }
 
       if (ctx->NewState & _NEW_PIXEL)
-         _mesa_update_state(ctx);
+         _mesa_update_pixel(ctx);
 
       _mesa_lock_texture(ctx, texObj);
       {
@@ -3396,7 +3398,7 @@ egl_image_target_texture(struct gl_context *ctx,
 {
    struct gl_texture_image *texImage;
    bool valid_target;
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    switch (target) {
    case GL_TEXTURE_2D:
@@ -3421,9 +3423,6 @@ egl_image_target_texture(struct gl_context *ctx,
       _mesa_error(ctx, GL_INVALID_VALUE, "%s(image=%p)", caller, image);
       return;
    }
-
-   if (ctx->NewState & _NEW_PIXEL)
-      _mesa_update_state(ctx);
 
    _mesa_lock_texture(ctx, texObj);
 
@@ -3561,10 +3560,10 @@ texture_sub_image(struct gl_context *ctx, GLuint dims,
                   GLsizei width, GLsizei height, GLsizei depth,
                   GLenum format, GLenum type, const GLvoid *pixels)
 {
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    if (ctx->NewState & _NEW_PIXEL)
-      _mesa_update_state(ctx);
+      _mesa_update_pixel(ctx);
 
    _mesa_lock_texture(ctx, texObj);
    {
@@ -3574,11 +3573,11 @@ texture_sub_image(struct gl_context *ctx, GLuint dims,
          case 3:
             if (target != GL_TEXTURE_2D_ARRAY)
                zoffset += texImage->Border;
-            /* fall-through */
+            FALLTHROUGH;
          case 2:
             if (target != GL_TEXTURE_1D_ARRAY)
                yoffset += texImage->Border;
-            /* fall-through */
+            FALLTHROUGH;
          case 1:
             xoffset += texImage->Border;
          }
@@ -4203,11 +4202,11 @@ copy_texture_sub_image(struct gl_context *ctx, GLuint dims,
    case 3:
       if (target != GL_TEXTURE_2D_ARRAY)
          zoffset += texImage->Border;
-      /* fall-through */
+      FALLTHROUGH;
    case 2:
       if (target != GL_TEXTURE_1D_ARRAY)
          yoffset += texImage->Border;
-      /* fall-through */
+      FALLTHROUGH;
    case 1:
       xoffset += texImage->Border;
    }
@@ -4240,12 +4239,15 @@ copy_texture_sub_image_err(struct gl_context *ctx, GLuint dims,
                            GLint x, GLint y, GLsizei width, GLsizei height,
                            const char *caller)
 {
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
       _mesa_debug(ctx, "%s %s %d %d %d %d %d %d %d %d\n", caller,
                   _mesa_enum_to_string(target),
                   level, xoffset, yoffset, zoffset, x, y, width, height);
+
+   if (ctx->NewState & _NEW_PIXEL)
+      _mesa_update_pixel(ctx);
 
    if (ctx->NewState & NEW_COPY_TEX_STATE)
       _mesa_update_state(ctx);
@@ -4268,7 +4270,10 @@ copy_texture_sub_image_no_error(struct gl_context *ctx, GLuint dims,
                                 GLint xoffset, GLint yoffset, GLint zoffset,
                                 GLint x, GLint y, GLsizei width, GLsizei height)
 {
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
+
+   if (ctx->NewState & _NEW_PIXEL)
+      _mesa_update_pixel(ctx);
 
    if (ctx->NewState & NEW_COPY_TEX_STATE)
       _mesa_update_state(ctx);
@@ -4290,7 +4295,7 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
    struct gl_texture_image *texImage;
    mesa_format texFormat;
 
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
       _mesa_debug(ctx, "glCopyTexImage%uD %s %d %s %d %d %d %d %d\n",
@@ -4298,6 +4303,9 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
                   _mesa_enum_to_string(target), level,
                   _mesa_enum_to_string(internalFormat),
                   x, y, width, height, border);
+
+   if (ctx->NewState & _NEW_PIXEL)
+      _mesa_update_pixel(ctx);
 
    if (ctx->NewState & NEW_COPY_TEX_STATE)
       _mesa_update_state(ctx);
@@ -5658,7 +5666,7 @@ compressed_texture_sub_image(struct gl_context *ctx, GLuint dims,
                              GLsizei height, GLsizei depth, GLenum format,
                              GLsizei imageSize, const GLvoid *data)
 {
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    _mesa_lock_texture(ctx, texObj);
    {
@@ -5732,7 +5740,7 @@ compressed_tex_sub_image(unsigned dim, GLenum target, GLuint textureOrIndex,
          break;
       case TEX_MODE_CURRENT_NO_ERROR:
          no_error = true;
-         /* fallthrough */
+         FALLTHROUGH;
       case TEX_MODE_CURRENT_ERROR:
       default:
          assert(textureOrIndex == 0);
@@ -6330,11 +6338,11 @@ texture_buffer_range(struct gl_context *ctx,
       return;
    }
 
-   FLUSH_VERTICES(ctx, 0);
+   FLUSH_VERTICES(ctx, 0, GL_TEXTURE_BIT);
 
    _mesa_lock_texture(ctx, texObj);
    {
-      _mesa_reference_buffer_object(ctx, &texObj->BufferObject, bufObj);
+      _mesa_reference_buffer_object_shared(ctx, &texObj->BufferObject, bufObj);
       texObj->BufferObjectFormat = internalFormat;
       texObj->_BufferObjectFormat = format;
       texObj->BufferOffset = offset;
@@ -6734,8 +6742,8 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
    bool dsa = strstr(func, "ture") ? true : false;
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
-      _mesa_debug(ctx, "%s(target=%s, samples=%d)\n", func,
-                  _mesa_enum_to_string(target), samples);
+      _mesa_debug(ctx, "%s(target=%s, samples=%d, internalformat=%s)\n", func,
+                  _mesa_enum_to_string(target), samples, _mesa_enum_to_string(internalformat));
    }
 
    if (!((ctx->Extensions.ARB_texture_multisample

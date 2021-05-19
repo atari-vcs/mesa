@@ -189,10 +189,7 @@ void fill_desc_set_info(isel_context *ctx, nir_function_impl *impl)
             res = intrin->src[0].ssa;
             break;
          case nir_intrinsic_store_ssbo:
-            if (nir_src_is_divergent(intrin->src[2]) ||
-                ctx->program->chip_class < GFX8 || ctx->program->chip_class >= GFX10_3 ||
-                (intrin->src[0].ssa->bit_size < 32 && !can_subdword_ssbo_store_use_smem(intrin)))
-               flags |= glc ? has_glc_vmem_store : has_nonglc_vmem_store;
+            flags |= glc ? has_glc_vmem_store : has_nonglc_vmem_store;
             res = intrin->src[1].ssa;
             break;
          case nir_intrinsic_load_global:
@@ -215,6 +212,7 @@ void fill_desc_set_info(isel_context *ctx, nir_function_impl *impl)
             flags |= has_glc_vmem_load | has_glc_vmem_store;
             break;
          case nir_intrinsic_image_deref_load:
+         case nir_intrinsic_image_deref_sparse_load:
             res = intrin->src[0].ssa;
             flags |= glc ? has_glc_vmem_load : has_nonglc_vmem_load;
             break;
@@ -330,7 +328,10 @@ setup_vs_output_info(isel_context *ctx, nir_shader *nir,
 
    outinfo->param_exports = 0;
    int pos_written = 0x1;
-   if (outinfo->writes_pointsize || outinfo->writes_viewport_index || outinfo->writes_layer)
+   bool writes_primitive_shading_rate = outinfo->writes_primitive_shading_rate ||
+                                        ctx->options->force_vrs_rates;
+   if (outinfo->writes_pointsize || outinfo->writes_viewport_index || outinfo->writes_layer ||
+       writes_primitive_shading_rate)
       pos_written |= 1 << 1;
 
    uint64_t mask = nir->info.outputs_written;
@@ -367,6 +368,15 @@ setup_vs_output_info(isel_context *ctx, nir_shader *nir,
       pos_written |= 1 << 3;
 
    outinfo->pos_exports = util_bitcount(pos_written);
+
+   /* GFX10+ early rasterization:
+    * When there are no param exports in an NGG (or legacy VS) shader,
+    * RADV sets NO_PC_EXPORT=1, which means the HW will start clipping and rasterization
+    * as soon as it encounters a DONE pos export. When this happens, PS waves can launch
+    * before the NGG (or VS) waves finish.
+    */
+   ctx->program->early_rast = ctx->program->chip_class >= GFX10 &&
+                              outinfo->param_exports == 0;
 }
 
 void
@@ -382,16 +392,13 @@ setup_vs_variables(isel_context *ctx, nir_shader *nir)
          assert(!ctx->args->shader_info->so.num_outputs);
 
       /* TODO: check if the shader writes edge flags (not in Vulkan) */
-      ctx->ngg_nogs_early_prim_export = true;
-   } else if (ctx->stage == vertex_ls) {
-      ctx->tcs_num_inputs = ctx->program->info->vs.num_linked_outputs;
+      ctx->ngg_nogs_early_prim_export = exec_list_is_singular(&nir_shader_get_entrypoint(nir)->body);
    }
 
    if (ctx->stage == vertex_ngg && ctx->args->options->key.vs_common_out.export_prim_id) {
       /* We need to store the primitive IDs in LDS */
       unsigned lds_size = ctx->program->info->ngg_info.esgs_ring_size;
-      ctx->program->config->lds_size = (lds_size + ctx->program->lds_alloc_granule - 1) /
-                                       ctx->program->lds_alloc_granule;
+      ctx->program->config->lds_size = DIV_ROUND_UP(lds_size, ctx->program->dev.lds_encoding_granule);
    }
 }
 
@@ -412,14 +419,16 @@ void setup_gs_variables(isel_context *ctx, nir_shader *nir)
       ctx->ngg_gs_emit_vtx_bytes = ctx->ngg_gs_primflags_offset + 4u;
       ctx->ngg_gs_emit_addr = esgs_ring_bytes;
       ctx->ngg_gs_scratch_addr = ctx->ngg_gs_emit_addr + ngg_emit_bytes;
+      ctx->ngg_gs_scratch_addr = ALIGN(ctx->ngg_gs_scratch_addr, 16u);
 
-      unsigned total_lds_bytes = esgs_ring_bytes + ngg_emit_bytes + ngg_gs_scratch_bytes;
+      unsigned total_lds_bytes = ctx->ngg_gs_scratch_addr + ngg_gs_scratch_bytes;
       assert(total_lds_bytes >= ctx->ngg_gs_emit_addr);
       assert(total_lds_bytes >= ctx->ngg_gs_scratch_addr);
-      ctx->program->config->lds_size = (total_lds_bytes + ctx->program->lds_alloc_granule - 1) / ctx->program->lds_alloc_granule;
+      ctx->program->config->lds_size = DIV_ROUND_UP(total_lds_bytes, ctx->program->dev.lds_encoding_granule);
 
       /* Make sure we have enough room for emitted GS vertices */
-      assert((ngg_emit_bytes % (ctx->ngg_gs_emit_vtx_bytes * nir->info.gs.vertices_out)) == 0);
+      if (nir->info.gs.vertices_out)
+         assert((ngg_emit_bytes % (ctx->ngg_gs_emit_vtx_bytes * nir->info.gs.vertices_out)) == 0);
 
       /* See if the number of vertices and primitives are compile-time known */
       nir_gs_count_vertices_and_primitives(nir, ctx->ngg_gs_const_vtxcnt, ctx->ngg_gs_const_prmcnt, 4u);
@@ -435,59 +444,16 @@ void setup_gs_variables(isel_context *ctx, nir_shader *nir)
 void
 setup_tcs_info(isel_context *ctx, nir_shader *nir, nir_shader *vs)
 {
-   /* When the number of TCS input and output vertices are the same (typically 3):
-    * - There is an equal amount of LS and HS invocations
-    * - In case of merged LSHS shaders, the LS and HS halves of the shader
-    *   always process the exact same vertex. We can use this knowledge to optimize them.
-    *
-    * We don't set tcs_in_out_eq if the float controls differ because that might
-    * involve different float modes for the same block and our optimizer
-    * doesn't handle a instruction dominating another with a different mode.
-    */
-   ctx->tcs_in_out_eq =
-      ctx->stage == vertex_tess_control_hs &&
-      ctx->args->options->key.tcs.input_vertices == nir->info.tess.tcs_vertices_out &&
-      vs->info.float_controls_execution_mode == nir->info.float_controls_execution_mode;
-
-   if (ctx->tcs_in_out_eq) {
-      ctx->tcs_temp_only_inputs = ~nir->info.tess.tcs_cross_invocation_inputs_read &
-                                    ~nir->info.inputs_read_indirectly &
-                                    nir->info.inputs_read;
-   }
-
-   ctx->tcs_num_inputs = ctx->program->info->tcs.num_linked_inputs;
-   ctx->tcs_num_outputs = ctx->program->info->tcs.num_linked_outputs;
-   ctx->tcs_num_patch_outputs = ctx->program->info->tcs.num_linked_patch_outputs;
-
-   ctx->tcs_num_patches = get_tcs_num_patches(
-                             ctx->args->options->key.tcs.input_vertices,
-                             nir->info.tess.tcs_vertices_out,
-                             ctx->tcs_num_inputs,
-                             ctx->tcs_num_outputs,
-                             ctx->tcs_num_patch_outputs,
-                             ctx->args->options->tess_offchip_block_dw_size,
-                             ctx->args->options->chip_class,
-                             ctx->args->options->family);
-   unsigned lds_size = calculate_tess_lds_size(
-                             ctx->args->options->chip_class,
-                             ctx->args->options->key.tcs.input_vertices,
-                             nir->info.tess.tcs_vertices_out,
-                             ctx->tcs_num_inputs,
-                             ctx->tcs_num_patches,
-                             ctx->tcs_num_outputs,
-                             ctx->tcs_num_patch_outputs);
-
-   ctx->args->shader_info->tcs.num_patches = ctx->tcs_num_patches;
-   ctx->args->shader_info->tcs.num_lds_blocks = lds_size;
-   ctx->program->config->lds_size = (lds_size + ctx->program->lds_alloc_granule - 1) /
-                                    ctx->program->lds_alloc_granule;
+   ctx->tcs_in_out_eq = ctx->args->shader_info->vs.tcs_in_out_eq;
+   ctx->tcs_temp_only_inputs = ctx->args->shader_info->vs.tcs_temp_only_input_mask;
+   ctx->tcs_num_patches = ctx->args->shader_info->num_tess_patches;
+   ctx->program->config->lds_size = ctx->args->shader_info->tcs.num_lds_blocks;
 }
 
 void
 setup_tes_variables(isel_context *ctx, nir_shader *nir)
 {
-   ctx->tcs_num_patches = ctx->args->options->key.tes.num_patches;
-   ctx->tcs_num_outputs = ctx->program->info->tes.num_linked_inputs;
+   ctx->tcs_num_patches = ctx->args->shader_info->num_tess_patches;
 
    if (ctx->stage == tess_eval_vs || ctx->stage == tess_eval_ngg) {
       radv_vs_output_info *outinfo = &ctx->program->info->tes.outinfo;
@@ -498,8 +464,7 @@ setup_tes_variables(isel_context *ctx, nir_shader *nir)
       if (ctx->stage.hw == HWStage::NGG)
          assert(!ctx->args->shader_info->so.num_outputs);
 
-      /* Tess eval shaders can't write edge flags, so this can be always true. */
-      ctx->ngg_nogs_early_prim_export = true;
+      ctx->ngg_nogs_early_prim_export = exec_list_is_singular(&nir_shader_get_entrypoint(nir)->body);
    }
 }
 
@@ -511,8 +476,7 @@ setup_variables(isel_context *ctx, nir_shader *nir)
       break;
    }
    case MESA_SHADER_COMPUTE: {
-      ctx->program->config->lds_size = (nir->info.cs.shared_size + ctx->program->lds_alloc_granule - 1) /
-                                       ctx->program->lds_alloc_granule;
+      ctx->program->config->lds_size = DIV_ROUND_UP(nir->info.shared_size, ctx->program->dev.lds_encoding_granule);
       break;
    }
    case MESA_SHADER_VERTEX: {
@@ -535,7 +499,7 @@ setup_variables(isel_context *ctx, nir_shader *nir)
    }
 
    /* Make sure we fit the available LDS space. */
-   assert((ctx->program->config->lds_size * ctx->program->lds_alloc_granule) <= ctx->program->lds_limit);
+   assert((ctx->program->config->lds_size * ctx->program->dev.lds_encoding_granule) <= ctx->program->dev.lds_limit);
 }
 
 void
@@ -549,24 +513,6 @@ setup_nir(isel_context *ctx, nir_shader *nir)
 
    nir_function_impl *func = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(func);
-}
-
-void
-setup_xnack(Program *program)
-{
-   switch (program->family) {
-   /* GFX8 APUs */
-   case CHIP_CARRIZO:
-   case CHIP_STONEY:
-   /* GFX9 APUS */
-   case CHIP_RAVEN:
-   case CHIP_RAVEN2:
-   case CHIP_RENOIR:
-      program->xnack_enabled = true;
-      break;
-   default:
-      break;
-   }
 }
 
 } /* end namespace */
@@ -671,7 +617,7 @@ void init_context(isel_context *ctx, nir_shader *shader)
             switch(instr->type) {
             case nir_instr_type_alu: {
                nir_alu_instr *alu_instr = nir_instr_as_alu(instr);
-               RegType type = RegType::sgpr;
+               RegType type = nir_dest_is_divergent(alu_instr->dest.dest) ? RegType::vgpr : RegType::sgpr;
                switch(alu_instr->op) {
                   case nir_op_fmul:
                   case nir_op_fadd:
@@ -736,11 +682,20 @@ void init_context(isel_context *ctx, nir_shader *shader)
                   case nir_op_b2f16:
                   case nir_op_b2f32:
                   case nir_op_mov:
-                     type = nir_dest_is_divergent(alu_instr->dest.dest) ? RegType::vgpr : RegType::sgpr;
                      break;
-                  case nir_op_bcsel:
-                     type = nir_dest_is_divergent(alu_instr->dest.dest) ? RegType::vgpr : RegType::sgpr;
-                     /* fallthrough */
+                  case nir_op_iadd:
+                  case nir_op_isub:
+                  case nir_op_imul:
+                  case nir_op_imin:
+                  case nir_op_imax:
+                  case nir_op_umin:
+                  case nir_op_umax:
+                  case nir_op_ishl:
+                  case nir_op_ishr:
+                  case nir_op_ushr:
+                     /* packed 16bit instructions have to be VGPR */
+                     type = alu_instr->dest.dest.ssa.num_components == 2 ? RegType::vgpr : type;
+                     FALLTHROUGH;
                   default:
                      for (unsigned i = 0; i < nir_op_infos[alu_instr->op].num_inputs; i++) {
                         if (regclasses[alu_instr->src[i].src.ssa->index].type() == RegType::vgpr)
@@ -773,13 +728,19 @@ void init_context(isel_context *ctx, nir_shader *shader)
                   case nir_intrinsic_load_num_subgroups:
                   case nir_intrinsic_load_first_vertex:
                   case nir_intrinsic_load_base_instance:
-                  case nir_intrinsic_get_ssbo_size:
                   case nir_intrinsic_vote_all:
                   case nir_intrinsic_vote_any:
                   case nir_intrinsic_read_first_invocation:
                   case nir_intrinsic_read_invocation:
                   case nir_intrinsic_first_invocation:
                   case nir_intrinsic_ballot:
+                  case nir_intrinsic_load_ring_tess_factors_amd:
+                  case nir_intrinsic_load_ring_tess_factors_offset_amd:
+                  case nir_intrinsic_load_ring_tess_offchip_amd:
+                  case nir_intrinsic_load_ring_tess_offchip_offset_amd:
+                  case nir_intrinsic_load_ring_esgs_amd:
+                  case nir_intrinsic_load_ring_es2gs_offset_amd:
+                  case nir_intrinsic_image_deref_samples:
                      type = RegType::sgpr;
                      break;
                   case nir_intrinsic_load_sample_id:
@@ -799,6 +760,7 @@ void init_context(isel_context *ctx, nir_shader *shader)
                   case nir_intrinsic_load_barycentric_at_offset:
                   case nir_intrinsic_load_interpolated_input:
                   case nir_intrinsic_load_frag_coord:
+                  case nir_intrinsic_load_frag_shading_rate:
                   case nir_intrinsic_load_sample_pos:
                   case nir_intrinsic_load_layer_id:
                   case nir_intrinsic_load_local_invocation_id:
@@ -853,6 +815,9 @@ void init_context(isel_context *ctx, nir_shader *shader)
                   case nir_intrinsic_load_scratch:
                   case nir_intrinsic_load_invocation_id:
                   case nir_intrinsic_load_primitive_id:
+                  case nir_intrinsic_load_buffer_amd:
+                  case nir_intrinsic_load_tess_rel_patch_id_amd:
+                  case nir_intrinsic_load_gs_vertex_offset_amd:
                      type = RegType::vgpr;
                      break;
                   case nir_intrinsic_shuffle:
@@ -870,6 +835,7 @@ void init_context(isel_context *ctx, nir_shader *shader)
                   case nir_intrinsic_load_global:
                   case nir_intrinsic_vulkan_resource_index:
                   case nir_intrinsic_load_shared:
+                  case nir_intrinsic_get_ssbo_size:
                      type = nir_dest_is_divergent(intrinsic->dest) ? RegType::vgpr : RegType::sgpr;
                      break;
                   case nir_intrinsic_load_view_index:
@@ -909,9 +875,19 @@ void init_context(isel_context *ctx, nir_shader *shader)
                            spi_ps_inputs |= S_0286CC_POS_X_FLOAT_ENA(1) << i;
 
                      }
+
+                     if (ctx->options->adjust_frag_coord_z &&
+                         intrinsic->intrinsic == nir_intrinsic_load_frag_coord &&
+                         G_0286CC_POS_Z_FLOAT_ENA(spi_ps_inputs)) {
+                        /* Enable ancillary for adjusting gl_FragCoord.z for
+                         * VRS due to a hw bug on some GFX10.3 chips.
+                         */
+                        spi_ps_inputs |= S_0286CC_ANCILLARY_ENA(1);
+                     }
                      break;
                   }
                   case nir_intrinsic_load_sample_id:
+                  case nir_intrinsic_load_frag_shading_rate:
                      spi_ps_inputs |= S_0286CC_ANCILLARY_ENA(1);
                      break;
                   case nir_intrinsic_load_sample_mask_in:
@@ -1094,7 +1070,7 @@ setup_isel_context(Program* program,
       unreachable("Shader stage not implemented");
 
    init_program(program, Stage { hw_stage, sw_stage }, args->shader_info,
-                args->options->chip_class, args->options->family, config);
+                args->options->chip_class, args->options->family, args->options->wgp_mode, config);
 
    isel_context ctx = {};
    ctx.program = program;
@@ -1151,8 +1127,6 @@ setup_isel_context(Program* program,
    }
 
    calc_min_waves(program);
-   program->vgpr_limit = get_addr_vgpr_from_waves(program, program->min_waves);
-   program->sgpr_limit = get_addr_sgpr_from_waves(program, program->min_waves);
 
    unsigned scratch_size = 0;
    if (program->stage == gs_copy_vs) {
@@ -1171,15 +1145,7 @@ setup_isel_context(Program* program,
    ctx.program->config->scratch_bytes_per_wave = align(scratch_size * ctx.program->wave_size, 1024);
 
    ctx.block = ctx.program->create_and_insert_block();
-   ctx.block->loop_nest_depth = 0;
    ctx.block->kind = block_kind_top_level;
-
-   setup_xnack(program);
-   program->sram_ecc_enabled = args->options->family == CHIP_ARCTURUS;
-   /* apparently gfx702 also has fast v_fma_f32 but I can't find a family for that */
-   program->has_fast_fma32 = program->chip_class >= GFX9;
-   if (args->options->family == CHIP_TAHITI || args->options->family == CHIP_CARRIZO || args->options->family == CHIP_HAWAII)
-      program->has_fast_fma32 = true;
 
    return ctx;
 }

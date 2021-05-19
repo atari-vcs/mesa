@@ -6,11 +6,12 @@ Uploaders: Andreas Boll <aboll@debian.org>
 Standards-Version: 4.1.4
 Build-Depends:
  debhelper-compat (= 12),
+ directx-headers-dev [linux-amd64 linux-arm64],
  glslang-tools [amd64 arm64 armel armhf i386 mips64el mipsel powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  meson (>= 0.45),
  quilt (>= 0.63-8.2~),
  pkg-config,
- libdrm-dev (>= 2.4.101),
+ libdrm-dev (>= 2.4.105-2),
  libx11-dev,
  libxxf86vm-dev,
  libexpat1-dev,
@@ -415,8 +416,7 @@ Description: Mesa Vulkan graphics drivers
 #Architecture: amd64 arm64 armel armhf i386 mips64el mipsel powerpc ppc64 ppc64el s390x sparc64
 #Pre-Depends: ${misc:Pre-Depends}
 #Depends:
-# libclc-r600 (>= 0.2.0+git20180312-1~),
-# libclc-amdgcn (>= 0.2.0+git20180312-1~),
+# libclc-12,
 # ocl-icd-libopencl1 | libopencl1,
 # ${shlibs:Depends},
 # ${misc:Depends},

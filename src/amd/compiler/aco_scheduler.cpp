@@ -33,9 +33,9 @@
 #define VMEM_WINDOW_SIZE (1024 - ctx.num_waves * 64)
 #define POS_EXP_WINDOW_SIZE 512
 #define SMEM_MAX_MOVES (64 - ctx.num_waves * 4)
-#define VMEM_MAX_MOVES (128 - ctx.num_waves * 8)
+#define VMEM_MAX_MOVES (256 - ctx.num_waves * 16)
 /* creating clauses decreases def-use distances, so make it less aggressive the lower num_waves is */
-#define VMEM_CLAUSE_MAX_GRAB_DIST ((ctx.num_waves - 1) * 8)
+#define VMEM_CLAUSE_MAX_GRAB_DIST (ctx.num_waves * 8)
 #define POS_EXP_MAX_MOVES 512
 
 namespace aco {
@@ -320,7 +320,7 @@ void MoveState::upwards_skip()
 bool is_gs_or_done_sendmsg(const Instruction *instr)
 {
    if (instr->opcode == aco_opcode::s_sendmsg) {
-      uint16_t imm = static_cast<const SOPP_instruction*>(instr)->imm;
+      uint16_t imm = instr->sopp().imm;
       return (imm & sendmsg_id_mask) == _sendmsg_gs ||
              (imm & sendmsg_id_mask) == _sendmsg_gs_done;
    }
@@ -329,20 +329,18 @@ bool is_gs_or_done_sendmsg(const Instruction *instr)
 
 bool is_done_sendmsg(const Instruction *instr)
 {
-   if (instr->opcode == aco_opcode::s_sendmsg) {
-      uint16_t imm = static_cast<const SOPP_instruction*>(instr)->imm;
-      return (imm & sendmsg_id_mask) == _sendmsg_gs_done;
-   }
+   if (instr->opcode == aco_opcode::s_sendmsg)
+      return (instr->sopp().imm & sendmsg_id_mask) == _sendmsg_gs_done;
    return false;
 }
 
 memory_sync_info get_sync_info_with_hack(const Instruction* instr)
 {
    memory_sync_info sync = get_sync_info(instr);
-   if (instr->format == Format::SMEM && !instr->operands.empty() && instr->operands[0].bytes() == 16) {
+   if (instr->isSMEM() && !instr->operands.empty() && instr->operands[0].bytes() == 16) {
       // FIXME: currently, it doesn't seem beneficial to omit this due to how our scheduler works
       sync.storage = (storage_class)(sync.storage | storage_buffer);
-      sync.semantics = (memory_semantics)(sync.semantics | semantic_private);
+      sync.semantics = (memory_semantics)((sync.semantics | semantic_private) & ~semantic_can_reorder);
    }
    return sync;
 }
@@ -363,6 +361,7 @@ struct memory_event_set {
 struct hazard_query {
    bool contains_spill;
    bool contains_sendmsg;
+   bool uses_exec;
    memory_event_set mem_events;
    unsigned aliasing_storage; /* storage classes which are accessed (non-SMEM) */
    unsigned aliasing_storage_smem; /* storage classes which are accessed (SMEM) */
@@ -371,6 +370,7 @@ struct hazard_query {
 void init_hazard_query(hazard_query *query) {
    query->contains_spill = false;
    query->contains_sendmsg = false;
+   query->uses_exec = false;
    memset(&query->mem_events, 0, sizeof(query->mem_events));
    query->aliasing_storage = 0;
    query->aliasing_storage_smem = 0;
@@ -380,14 +380,14 @@ void add_memory_event(memory_event_set *set, Instruction *instr, memory_sync_inf
 {
    set->has_control_barrier |= is_done_sendmsg(instr);
    if (instr->opcode == aco_opcode::p_barrier) {
-      Pseudo_barrier_instruction *bar = static_cast<Pseudo_barrier_instruction*>(instr);
-      if (bar->sync.semantics & semantic_acquire)
-         set->bar_acquire |= bar->sync.storage;
-      if (bar->sync.semantics & semantic_release)
-         set->bar_release |= bar->sync.storage;
-      set->bar_classes |= bar->sync.storage;
+      Pseudo_barrier_instruction& bar = instr->barrier();
+      if (bar.sync.semantics & semantic_acquire)
+         set->bar_acquire |= bar.sync.storage;
+      if (bar.sync.semantics & semantic_release)
+         set->bar_release |= bar.sync.storage;
+      set->bar_classes |= bar.sync.storage;
 
-      set->has_control_barrier |= bar->exec_scope > scope_invocation;
+      set->has_control_barrier |= bar.exec_scope > scope_invocation;
    }
 
    if (!sync->storage)
@@ -411,6 +411,7 @@ void add_to_hazard_query(hazard_query *query, Instruction *instr)
    if (instr->opcode == aco_opcode::p_spill || instr->opcode == aco_opcode::p_reload)
       query->contains_spill = true;
    query->contains_sendmsg |= instr->opcode == aco_opcode::s_sendmsg;
+   query->uses_exec |= needs_exec_mask(instr);
 
    memory_sync_info sync = get_sync_info_with_hack(instr);
 
@@ -421,7 +422,7 @@ void add_to_hazard_query(hazard_query *query, Instruction *instr)
       /* images and buffer/global memory can alias */ //TODO: more precisely, buffer images and buffer/global memory can alias
       if (storage & (storage_buffer | storage_image))
          storage |= storage_buffer | storage_image;
-      if (instr->format == Format::SMEM)
+      if (instr->isSMEM())
          query->aliasing_storage_smem |= storage;
       else
          query->aliasing_storage |= storage;
@@ -444,15 +445,19 @@ enum HazardResult {
 
 HazardResult perform_hazard_query(hazard_query *query, Instruction *instr, bool upwards)
 {
-   if (instr->opcode == aco_opcode::p_exit_early_if)
-      return hazard_fail_exec;
-   for (const Definition& def : instr->definitions) {
-      if (def.isFixed() && def.physReg() == exec)
-         return hazard_fail_exec;
+   /* don't schedule discards downwards */
+   if (!upwards && instr->opcode == aco_opcode::p_exit_early_if)
+      return hazard_fail_unreorderable;
+
+   if (query->uses_exec) {
+      for (const Definition& def : instr->definitions) {
+         if (def.isFixed() && def.physReg() == exec)
+            return hazard_fail_exec;
+      }
    }
 
    /* don't move exports so that they stay closer together */
-   if (instr->format == Format::EXP)
+   if (instr->isEXP())
       return hazard_fail_export;
 
    /* don't move non-reorderable instructions */
@@ -501,7 +506,7 @@ HazardResult perform_hazard_query(hazard_query *query, Instruction *instr, bool 
       return hazard_fail_barrier;
 
    /* don't move memory loads/stores past potentially aliasing loads/stores */
-   unsigned aliasing_storage = instr->format == Format::SMEM ?
+   unsigned aliasing_storage = instr->isSMEM() ?
                                query->aliasing_storage_smem :
                                query->aliasing_storage;
    if ((sync.storage & aliasing_storage) && !(sync.semantics & semantic_can_reorder)) {
@@ -567,7 +572,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
 
       /* don't use LDS/GDS instructions to hide latency since it can
        * significanly worsen LDS scheduling */
-      if (candidate->format == Format::DS || !can_move_down) {
+      if (candidate->isDS() || !can_move_down) {
          add_to_hazard_query(&hq, candidate.get());
          ctx.mv.downwards_skip();
          continue;
@@ -674,7 +679,7 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
       assert(candidate_idx == ctx.mv.source_idx);
       assert(candidate_idx >= 0);
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
-      bool is_vmem = candidate->isVMEM() || candidate->isFlatOrGlobal();
+      bool is_vmem = candidate->isVMEM() || candidate->isFlatLike();
 
       /* break when encountering another VMEM instruction, logical_start or barriers */
       if (candidate->opcode == aco_opcode::p_logical_start)
@@ -726,7 +731,8 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
       }
       if (part_of_clause)
          add_to_hazard_query(&indep_hq, candidate_ptr);
-      k++;
+      else
+         k++;
       if (candidate_idx < ctx.last_SMEM_dep_idx)
          ctx.last_SMEM_stall++;
    }
@@ -740,7 +746,7 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
       assert(candidate_idx == ctx.mv.source_idx);
       assert(candidate_idx < (int) block->instructions.size());
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
-      bool is_vmem = candidate->isVMEM() || candidate->isFlatOrGlobal();
+      bool is_vmem = candidate->isVMEM() || candidate->isFlatLike();
 
       if (candidate->opcode == aco_opcode::p_logical_end)
          break;
@@ -775,6 +781,8 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
       if (is_dependency || !found_dependency) {
          if (found_dependency)
             add_to_hazard_query(&indep_hq, candidate.get());
+         else
+            k++;
          ctx.mv.upwards_skip();
          continue;
       }
@@ -812,7 +820,7 @@ void schedule_position_export(sched_ctx& ctx, Block* block,
 
       if (candidate->opcode == aco_opcode::p_logical_start)
          break;
-      if (candidate->isVMEM() || candidate->format == Format::SMEM || candidate->isFlatOrGlobal())
+      if (candidate->isVMEM() || candidate->isSMEM() || candidate->isFlatLike())
          break;
 
       HazardResult haz = perform_hazard_query(&hq, candidate.get(), false);
@@ -848,34 +856,25 @@ void schedule_block(sched_ctx& ctx, Program *program, Block* block, live& live_v
    for (unsigned idx = 0; idx < block->instructions.size(); idx++) {
       Instruction* current = block->instructions[idx].get();
 
+      if (block->kind & block_kind_export_end && current->isEXP()) {
+         unsigned target = current->exp().dest;
+         if (target >= V_008DFC_SQ_EXP_POS && target < V_008DFC_SQ_EXP_PRIM) {
+            ctx.mv.current = current;
+            schedule_position_export(ctx, block, live_vars.register_demand[block->index], current, idx);
+         }
+      }
+
       if (current->definitions.empty())
          continue;
 
-      if (current->isVMEM() || current->isFlatOrGlobal()) {
+      if (current->isVMEM() || current->isFlatLike()) {
          ctx.mv.current = current;
          schedule_VMEM(ctx, block, live_vars.register_demand[block->index], current, idx);
       }
 
-      if (current->format == Format::SMEM) {
+      if (current->isSMEM()) {
          ctx.mv.current = current;
          schedule_SMEM(ctx, block, live_vars.register_demand[block->index], current, idx);
-      }
-   }
-
-   if ((program->stage.hw == HWStage::VS || program->stage.hw == HWStage::NGG) &&
-       (block->kind & block_kind_export_end)) {
-      /* Try to move position exports as far up as possible, to reduce register
-       * usage and because ISA reference guides say so. */
-      for (unsigned idx = 0; idx < block->instructions.size(); idx++) {
-         Instruction* current = block->instructions[idx].get();
-
-         if (current->format == Format::EXP) {
-            unsigned target = static_cast<Export_instruction*>(current)->dest;
-            if (target >= V_008DFC_SQ_EXP_POS && target < V_008DFC_SQ_EXP_PARAM) {
-               ctx.mv.current = current;
-               schedule_position_export(ctx, block, live_vars.register_demand[block->index], current, idx);
-            }
-         }
       }
    }
 
@@ -893,6 +892,7 @@ void schedule_program(Program *program, live& live_vars)
    RegisterDemand demand;
    for (Block& block : program->blocks)
       demand.update(block.register_demand);
+   demand.vgpr += program->config->num_shared_vgprs / 2;
 
    sched_ctx ctx;
    ctx.mv.depends_on.resize(program->peekAllocationId());
@@ -901,20 +901,25 @@ void schedule_program(Program *program, live& live_vars)
    /* Allowing the scheduler to reduce the number of waves to as low as 5
     * improves performance of Thrones of Britannia significantly and doesn't
     * seem to hurt anything else. */
-   if (program->num_waves <= 5)
+   //TODO: account for possible uneven num_waves on GFX10+
+   unsigned wave_fac = program->dev.physical_vgprs / 256;
+   if (program->num_waves <= 5 * wave_fac)
       ctx.num_waves = program->num_waves;
    else if (demand.vgpr >= 29)
-      ctx.num_waves = 5;
+      ctx.num_waves = 5 * wave_fac;
    else if (demand.vgpr >= 25)
-      ctx.num_waves = 6;
+      ctx.num_waves = 6 * wave_fac;
    else
-      ctx.num_waves = 7;
+      ctx.num_waves = 7 * wave_fac;
    ctx.num_waves = std::max<uint16_t>(ctx.num_waves, program->min_waves);
    ctx.num_waves = std::min<uint16_t>(ctx.num_waves, program->num_waves);
 
+   /* VMEM_MAX_MOVES and such assume pre-GFX10 wave count */
+   ctx.num_waves = std::max<uint16_t>(ctx.num_waves / wave_fac, 1);
+
    assert(ctx.num_waves > 0);
-   ctx.mv.max_registers = { int16_t(get_addr_vgpr_from_waves(program, ctx.num_waves) - 2),
-                            int16_t(get_addr_sgpr_from_waves(program, ctx.num_waves))};
+   ctx.mv.max_registers = { int16_t(get_addr_vgpr_from_waves(program, ctx.num_waves * wave_fac) - 2),
+                            int16_t(get_addr_sgpr_from_waves(program, ctx.num_waves * wave_fac))};
 
    for (Block& block : program->blocks)
       schedule_block(ctx, program, &block, live_vars);

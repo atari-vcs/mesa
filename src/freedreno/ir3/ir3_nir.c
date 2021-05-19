@@ -72,6 +72,8 @@ static const nir_shader_compiler_options options = {
 		.lower_rotate = true,
 		.lower_to_scalar = true,
 		.has_imul24 = true,
+		.has_fsub = true,
+		.has_isub = true,
 		.lower_wpos_pntc = true,
 		.lower_cs_local_index_from_id = true,
 
@@ -125,6 +127,8 @@ static const nir_shader_compiler_options options_a6xx = {
 		.vectorize_io = true,
 		.lower_to_scalar = true,
 		.has_imul24 = true,
+		.has_fsub = true,
+		.has_isub = true,
 		.max_unroll_iterations = 32,
 		.lower_wpos_pntc = true,
 		.lower_cs_local_index_from_id = true,
@@ -135,6 +139,7 @@ static const nir_shader_compiler_options options_a6xx = {
 		 */
 		.lower_int64_options = (nir_lower_int64_options)~0,
 		.lower_uniforms_to_ubo = true,
+		.lower_device_index_to_zero = true,
 };
 
 const nir_shader_compiler_options *
@@ -150,7 +155,8 @@ ir3_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
 		unsigned bit_size,
 		unsigned num_components,
 		nir_intrinsic_instr *low,
-		nir_intrinsic_instr *high)
+		nir_intrinsic_instr *high,
+		void *data)
 {
 	assert(bit_size >= 8);
 	if (bit_size != 32)
@@ -218,8 +224,12 @@ ir3_optimize_loop(nir_shader *s)
 		progress |= OPT(s, nir_lower_pack);
 		progress |= OPT(s, nir_opt_constant_folding);
 
-		progress |= OPT(s, nir_opt_load_store_vectorize, nir_var_mem_ubo,
-				ir3_nir_should_vectorize_mem, 0);
+		nir_load_store_vectorize_options vectorize_opts = {
+		   .modes = nir_var_mem_ubo,
+		   .callback = ir3_nir_should_vectorize_mem,
+		   .robust_modes = 0,
+		};
+		progress |= OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
 
 		if (lower_flrp != 0) {
 			if (OPT(s, nir_lower_flrp,
@@ -261,6 +271,7 @@ should_split_wrmask(const nir_instr *instr, const void *data)
 	case nir_intrinsic_store_ssbo:
 	case nir_intrinsic_store_shared:
 	case nir_intrinsic_store_global:
+	case nir_intrinsic_store_scratch:
 		return true;
 	default:
 		return false;
@@ -309,7 +320,11 @@ ir3_finalize_nir(struct ir3_compiler *compiler, nir_shader *s)
 	/* do idiv lowering after first opt loop to get a chance to propagate
 	 * constants for divide by immed power-of-two:
 	 */
-	const bool idiv_progress = OPT(s, nir_lower_idiv, nir_lower_idiv_fast);
+	nir_lower_idiv_options idiv_options = {
+		.imprecise_32bit_lowering = true,
+		.allow_fp16 = true,
+	};
+	const bool idiv_progress = OPT(s, nir_lower_idiv, &idiv_options);
 
 	if (idiv_progress)
 		ir3_optimize_loop(s);
@@ -321,6 +336,21 @@ ir3_finalize_nir(struct ir3_compiler *compiler, nir_shader *s)
 		nir_print_shader(s, stdout);
 		debug_printf("----------------------\n");
 	}
+
+	/* st_program.c's parameter list optimization requires that future nir
+	 * variants don't reallocate the uniform storage, so we have to remove
+	 * uniforms that occupy storage.  But we don't want to remove samplers,
+	 * because they're needed for YUV variant lowering.
+	 */
+	nir_foreach_uniform_variable_safe(var, s) {
+      if (var->data.mode == nir_var_uniform &&
+          (glsl_type_get_image_count(var->type) ||
+           glsl_type_get_sampler_count(var->type)))
+         continue;
+
+		exec_node_remove(&var->node);
+	}
+	nir_validate_shader(s, "after uniform var removal");
 
 	nir_sweep(s);
 }
@@ -347,7 +377,7 @@ ir3_nir_post_finalize(struct ir3_compiler *compiler, nir_shader *s)
 	if (compiler->gpu_id >= 600 &&
 			s->info.stage == MESA_SHADER_FRAGMENT &&
 			!(ir3_shader_debug & IR3_DBG_NOFP16)) {
-		NIR_PASS_V(s, nir_lower_mediump_outputs);
+		NIR_PASS_V(s, nir_lower_mediump_io, nir_var_shader_out, 0, false);
 	}
 
 	/* we cannot ensure that ir3_finalize_nir() is only called once, so
@@ -396,7 +426,7 @@ ir3_nir_lower_view_layer_id(nir_shader *nir, bool layer_zero, bool view_zero)
 				b.cursor = nir_before_instr(&intrin->instr);
 				nir_ssa_def *zero = nir_imm_int(&b, 0);
 				nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
-										 nir_src_for_ssa(zero));
+										 zero);
 				nir_instr_remove(&intrin->instr);
 				progress = true;
 			}
@@ -454,51 +484,45 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
 	if (s->info.stage == MESA_SHADER_VERTEX) {
 		if (so->key.ucp_enables)
 			progress |= OPT(s, nir_lower_clip_vs, so->key.ucp_enables, false, false, NULL);
-		if (so->key.vclamp_color)
-			progress |= OPT(s, nir_lower_clamp_color_outputs);
 	} else if (s->info.stage == MESA_SHADER_FRAGMENT) {
 		bool layer_zero = so->key.layer_zero && (s->info.inputs_read & VARYING_BIT_LAYER);
 		bool view_zero = so->key.view_zero && (s->info.inputs_read & VARYING_BIT_VIEWPORT);
 
 		if (so->key.ucp_enables && !so->shader->compiler->has_clip_cull)
 			progress |= OPT(s, nir_lower_clip_fs, so->key.ucp_enables, false);
-		if (so->key.fclamp_color)
-			progress |= OPT(s, nir_lower_clamp_color_outputs);
 		if (layer_zero || view_zero)
 			progress |= OPT(s, ir3_nir_lower_view_layer_id, layer_zero, view_zero);
 	}
-	if (so->key.color_two_side) {
-		OPT_V(s, nir_lower_two_sided_color, true);
-		progress = true;
-	}
 
-	struct nir_lower_tex_options tex_options = { };
-
-	switch (so->shader->type) {
-	case MESA_SHADER_FRAGMENT:
-		tex_options.saturate_s = so->key.fsaturate_s;
-		tex_options.saturate_t = so->key.fsaturate_t;
-		tex_options.saturate_r = so->key.fsaturate_r;
-		break;
-	case MESA_SHADER_VERTEX:
-		tex_options.saturate_s = so->key.vsaturate_s;
-		tex_options.saturate_t = so->key.vsaturate_t;
-		tex_options.saturate_r = so->key.vsaturate_r;
-		break;
-	default:
-		/* TODO */
-		break;
-	}
-
-	if (tex_options.saturate_s || tex_options.saturate_t ||
-		tex_options.saturate_r) {
-		progress |= OPT(s, nir_lower_tex, &tex_options);
-	}
+	/* Move large constant variables to the constants attached to the NIR
+	 * shader, which we will upload in the immediates range.  This generates
+	 * amuls, so we need to clean those up after.
+	 *
+	 * Passing no size_align, we would get packed values, which if we end up
+	 * having to load with LDC would result in extra reads to unpack from
+	 * straddling loads.  Align everything to vec4 to avoid that, though we
+	 * could theoretically do better.
+	 */
+	OPT_V(s, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 32 /* bytes */);
+	OPT_V(s, ir3_nir_lower_load_constant, so);
 
 	if (!so->binning_pass)
 		OPT_V(s, ir3_nir_analyze_ubo_ranges, so);
 
 	progress |= OPT(s, ir3_nir_lower_ubo_loads, so);
+
+	/* Lower large temporaries to scratch, which in Qualcomm terms is private
+	 * memory, to avoid excess register pressure. This should happen after
+	 * nir_opt_large_constants, because loading from a UBO is much, much less
+	 * expensive.
+	 */
+	if (so->shader->compiler->has_pvtmem) {
+		NIR_PASS_V(s, nir_lower_vars_to_scratch, nir_var_function_temp,
+				   16 * 16 /* bytes */, glsl_get_natural_size_align_bytes);
+	}
+
+
+	OPT_V(s, nir_lower_amul, ir3_glsl_type_size);
 
 	/* UBO offset lowering has to come after we've decided what will
 	 * be left as load_ubo
@@ -509,6 +533,13 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
 	OPT_V(s, ir3_nir_lower_io_offsets, so->shader->compiler->gpu_id);
 
 	if (progress)
+		ir3_optimize_loop(s);
+
+	/* Fixup indirect load_uniform's which end up with a const base offset
+	 * which is too large to encode.  Do this late(ish) so we actually
+	 * can differentiate indirect vs non-indirect.
+	 */
+	if (OPT(s, ir3_nir_fixup_load_uniform))
 		ir3_optimize_loop(s);
 
 	/* Do late algebraic optimization to turn add(a, neg(b)) back into
@@ -613,6 +644,10 @@ ir3_nir_scan_driver_consts(nir_shader *shader,
 				case nir_intrinsic_load_local_group_size:
 					layout->num_driver_params =
 						MAX2(layout->num_driver_params, IR3_DP_LOCAL_GROUP_SIZE_Z + 1);
+					break;
+				case nir_intrinsic_load_base_work_group_id:
+					layout->num_driver_params =
+						MAX2(layout->num_driver_params, IR3_DP_BASE_GROUP_Z + 1);
 					break;
 				default:
 					break;

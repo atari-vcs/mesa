@@ -193,7 +193,7 @@ static void evergreen_cs_set_constant_buffer(struct r600_context *rctx,
 	cb.buffer = buffer;
 	cb.user_buffer = NULL;
 
-	rctx->b.b.set_constant_buffer(&rctx->b.b, PIPE_SHADER_COMPUTE, cb_index, &cb);
+	rctx->b.b.set_constant_buffer(&rctx->b.b, PIPE_SHADER_COMPUTE, cb_index, false, &cb);
 }
 
 /* We need to define these R600 registers here, because we can't include
@@ -461,7 +461,7 @@ static void *evergreen_create_compute_state(struct pipe_context *ctx,
 		PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
 	//TODO: use util_memcpy_cpu_to_le32 ?
 	memcpy(p, shader->bc.bytecode, shader->bc.ndw * 4);
-	rctx->b.ws->buffer_unmap(shader->code_bo->buf);
+	rctx->b.ws->buffer_unmap(rctx->b.ws, shader->code_bo->buf);
 #endif
 
 	return shader;
@@ -598,7 +598,7 @@ static void evergreen_emit_dispatch(struct r600_context *rctx,
 				    uint32_t indirect_grid[3])
 {
 	int i;
-	struct radeon_cmdbuf *cs = rctx->b.gfx.cs;
+	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	struct r600_pipe_compute *shader = rctx->cs_shader_state.shader;
 	bool render_cond_bit = rctx->b.render_cond && !rctx->b.render_cond_force_off;
 	unsigned num_waves;
@@ -678,7 +678,7 @@ static void evergreen_emit_dispatch(struct r600_context *rctx,
 
 static void compute_setup_cbs(struct r600_context *rctx)
 {
-	struct radeon_cmdbuf *cs = rctx->b.gfx.cs;
+	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	unsigned i;
 
 	/* Emit colorbuffers. */
@@ -720,7 +720,7 @@ static void compute_setup_cbs(struct r600_context *rctx)
 static void compute_emit_cs(struct r600_context *rctx,
 			    const struct pipe_grid_info *info)
 {
-	struct radeon_cmdbuf *cs = rctx->b.gfx.cs;
+	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	bool compute_dirty = false;
 	struct r600_pipe_shader *current;
 	struct r600_shader_atomic combined_atomics[8];
@@ -728,7 +728,7 @@ static void compute_emit_cs(struct r600_context *rctx,
 	uint32_t indirect_grid[3] = { 0, 0, 0 };
 
 	/* make sure that the gfx ring is only one active */
-	if (radeon_emitted(rctx->b.dma.cs, 0)) {
+	if (radeon_emitted(&rctx->b.dma.cs, 0)) {
 		rctx->b.dma.flush(rctx, PIPE_FLUSH_ASYNC, NULL);
 	}
 
@@ -890,7 +890,7 @@ void evergreen_emit_cs_shader(struct r600_context *rctx,
 	struct r600_cs_shader_state *state =
 					(struct r600_cs_shader_state*)atom;
 	struct r600_pipe_compute *shader = state->shader;
-	struct radeon_cmdbuf *cs = rctx->b.gfx.cs;
+	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	uint64_t va;
 	struct r600_resource *code_bo;
 	unsigned ngpr, nstack;
@@ -1288,7 +1288,7 @@ static void r600_compute_global_transfer_unmap(struct pipe_context *ctx,
 	 * to an offset within the compute memory pool.  The function
 	 * r600_compute_global_transfer_map() maps the memory pool
 	 * resource rather than the struct r600_resource_global passed to
-	 * it as an argument and then initalizes ptransfer->resource with
+	 * it as an argument and then initializes ptransfer->resource with
 	 * the memory pool resource (via pipe_buffer_map_range).
 	 * When transfer_unmap is called it uses the memory pool's
 	 * vtable which calls r600_buffer_transfer_map() rather than

@@ -50,13 +50,6 @@
 #include "wayland-drm-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 
-/* cheesy workaround until wayland 1.18 is released */
-#if WAYLAND_VERSION_MAJOR > 1 || \
-   (WAYLAND_VERSION_MAJOR == 1 && WAYLAND_VERSION_MINOR < 18)
-#define WL_SHM_FORMAT_ABGR16161616F 0x48344241
-#define WL_SHM_FORMAT_XBGR16161616F 0x48344258
-#endif
-
 /*
  * The index of entries in this table is used as a bitmask in
  * dri2_dpy->formats, which tracks the formats supported by our server.
@@ -1531,7 +1524,8 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
    if (roundtrip(dri2_dpy) < 0 || dri2_dpy->fd == -1)
       goto cleanup;
 
-   if (roundtrip(dri2_dpy) < 0 || !dri2_dpy->authenticated)
+   if (!dri2_dpy->authenticated &&
+       (roundtrip(dri2_dpy) < 0 || !dri2_dpy->authenticated))
       goto cleanup;
 
    dri2_dpy->fd = loader_get_user_preferred_fd(dri2_dpy->fd,

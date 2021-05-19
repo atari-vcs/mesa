@@ -44,7 +44,7 @@ kernel::kernel(clover::program &prog, const std::string &name,
          continue;
 
       auto mconst = find(f, m.secs);
-      auto rb = std::make_unique<root_buffer>(prog.context(),
+      auto rb = std::make_unique<root_buffer>(prog.context(), std::vector<cl_mem_properties>(),
                                               CL_MEM_COPY_HOST_PTR | CL_MEM_READ_ONLY,
                                               mconst.size, mconst.data.data());
       _constant_buffers.emplace(&dev, std::move(rb));
@@ -82,9 +82,9 @@ kernel::launch(command_queue &q,
                                exec.samplers.data());
 
    q.pipe->set_sampler_views(q.pipe, PIPE_SHADER_COMPUTE, 0,
-                             exec.sviews.size(), exec.sviews.data());
+                             exec.sviews.size(), 0, exec.sviews.data());
    q.pipe->set_shader_images(q.pipe, PIPE_SHADER_COMPUTE, 0,
-                             exec.iviews.size(), exec.iviews.data());
+                             exec.iviews.size(), 0, exec.iviews.data());
    q.pipe->set_compute_resources(q.pipe, 0, exec.resources.size(),
                                  exec.resources.data());
    q.pipe->set_global_binding(q.pipe, 0, exec.g_buffers.size(),
@@ -102,9 +102,9 @@ kernel::launch(command_queue &q,
    q.pipe->set_global_binding(q.pipe, 0, exec.g_buffers.size(), NULL, NULL);
    q.pipe->set_compute_resources(q.pipe, 0, exec.resources.size(), NULL);
    q.pipe->set_shader_images(q.pipe, PIPE_SHADER_COMPUTE, 0,
-                             exec.iviews.size(), NULL);
+                             0, exec.iviews.size(), NULL);
    q.pipe->set_sampler_views(q.pipe, PIPE_SHADER_COMPUTE, 0,
-                             exec.sviews.size(), NULL);
+                             0, exec.sviews.size(), NULL);
    q.pipe->bind_sampler_states(q.pipe, PIPE_SHADER_COMPUTE, 0,
                                exec.samplers.size(), NULL);
 
@@ -173,7 +173,7 @@ kernel::module(const command_queue &q) const {
 }
 
 kernel::exec_context::exec_context(kernel &kern) :
-   kern(kern), q(NULL), mem_local(0), st(NULL), cs() {
+   kern(kern), q(NULL), print_handler(), mem_local(0), st(NULL), cs() {
 }
 
 kernel::exec_context::~exec_context() {
@@ -251,6 +251,17 @@ kernel::exec_context::bind(intrusive_ptr<command_queue> _q,
          arg->bind(*this, marg);
          break;
       }
+      case module::argument::printf_buffer: {
+         print_handler = printf_handler::create(q, m.printf_infos,
+                                                m.printf_strings_in_buffer,
+                                                q->device().max_printf_buffer_size());
+         cl_mem print_mem = print_handler->get_mem();
+
+         auto arg = argument::create(marg);
+         arg->set(sizeof(cl_mem), &print_mem);
+         arg->bind(*this, marg);
+         break;
+      }
       }
    }
 
@@ -277,6 +288,9 @@ kernel::exec_context::bind(intrusive_ptr<command_queue> _q,
 
 void
 kernel::exec_context::unbind() {
+   if (print_handler)
+      print_handler->print();
+
    for (auto &arg : kern.args())
       arg.unbind(*this);
 
@@ -381,12 +395,10 @@ kernel::argument::create(const module::argument &marg) {
    case module::argument::constant:
       return std::unique_ptr<kernel::argument>(new constant_argument);
 
-   case module::argument::image2d_rd:
-   case module::argument::image3d_rd:
+   case module::argument::image_rd:
       return std::unique_ptr<kernel::argument>(new image_rd_argument);
 
-   case module::argument::image2d_wr:
-   case module::argument::image3d_wr:
+   case module::argument::image_wr:
       return std::unique_ptr<kernel::argument>(new image_wr_argument);
 
    case module::argument::sampler:
@@ -437,6 +449,9 @@ kernel::scalar_argument::bind(exec_context &ctx,
 
 void
 kernel::scalar_argument::unbind(exec_context &ctx) {
+}
+
+kernel::global_argument::global_argument() : buf(nullptr), svm(nullptr) {
 }
 
 void
@@ -615,6 +630,9 @@ kernel::image_wr_argument::bind(exec_context &ctx,
 
 void
 kernel::image_wr_argument::unbind(exec_context &ctx) {
+}
+
+kernel::sampler_argument::sampler_argument() : s(nullptr), st(nullptr) {
 }
 
 void

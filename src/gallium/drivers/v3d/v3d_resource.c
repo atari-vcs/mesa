@@ -616,7 +616,7 @@ v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride,
 
                 /* The HW aligns level 1's base to a page if any of level 1 or
                  * below could be UIF XOR.  The lower levels then inherit the
-                 * alignment for as long as necesary, thanks to being power of
+                 * alignment for as long as necessary, thanks to being power of
                  * two aligned.
                  */
                 if (i == 1 &&
@@ -864,10 +864,18 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 rsc->tiled = screen->ro == NULL;
                 break;
         default:
-                fprintf(stderr,
-                        "Attempt to import unsupported modifier 0x%llx\n",
-                        (long long)whandle->modifier);
-                goto fail;
+                switch(fourcc_mod_broadcom_mod(whandle->modifier)) {
+                case DRM_FORMAT_MOD_BROADCOM_SAND128:
+                        rsc->tiled = false;
+                        rsc->sand_col128_stride =
+                                fourcc_mod_broadcom_param(whandle->modifier);
+                        break;
+                default:
+                        fprintf(stderr,
+                                "Attempt to import unsupported modifier 0x%llx\n",
+                                (long long)whandle->modifier);
+                        goto fail;
+                }
         }
 
         switch (whandle->type) {

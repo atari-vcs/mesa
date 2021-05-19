@@ -1,13 +1,7 @@
-mesa (20.3.4-1apertis1vcs1) atari; urgency=medium
+mesa (21.1.0.4-1apertis1vcs1) vcs; urgency=medium
 
-  * Re-enable drivers that need libelf as they're all the AMD related drivers
-
- -- Sjoerd Simons <sjoerd@collabora.com>  Wed, 31 Mar 2021 15:09:36 +0200
-
-mesa (20.3.4-1apertis1) apertis; urgency=medium
-
-  * Sync updates from Debian Bullseye.
-  * Remaining Apertis specific chanages
+  * Sync updates from Debian Experimental.
+  * Remaining Apertis specific chanages:
     - Make sure libelf isn’t used as it's GPLv2||LGPLv3 dual-licensed which is
       not suitable for Apertis. In practise that means dropping
       * AMD vulkan driver
@@ -15,8 +9,108 @@ mesa (20.3.4-1apertis1) apertis; urgency=medium
       * r600 driver
       * gallium-opencl support.
     - As per above drop the mesa-opencl-icd package
+  * Remaining Atari specific changes:
+    - Re-enable drivers that need libelf as they're all the AMD related drivers
 
  -- Sjoerd Simons <sjoerd@debian.org>  Wed, 31 Mar 2021 14:38:02 +0200
+
+mesa (21.1.0-4) experimental; urgency=medium
+
+  * fix-ftbfs.diff: Fix build on armel/armhf/mipsel.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 17 May 2021 10:38:04 +0300
+
+mesa (21.1.0-3) experimental; urgency=medium
+
+  * rules: Drop the rule to clean up vulkan headers, not needed anymore.
+  * rules: Update vulkan layer option selection.
+  * libgbm1.symbols: Updated.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 06 May 2021 20:25:50 +0300
+
+mesa (21.1.0-2) experimental; urgency=medium
+
+  * control: Bump libdrm-dev build-dep.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 06 May 2021 16:46:12 +0300
+
+mesa (21.1.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * Build with llvm-12.
+  * path_max.diff: Refreshed.
+  * rules: vulkan_intel.h is gone.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 06 May 2021 16:05:12 +0300
+
+mesa (21.0.3-1) experimental; urgency=medium
+
+  * New upstream release.
+  * rules: Limit d3d12 by DEB_HOST_ARCH, not DEB_HOST_ARCH_CPU. (Closes:
+    #986660)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 22 Apr 2021 10:01:11 +0300
+
+mesa (21.0.2-1) experimental; urgency=medium
+
+  * New upstream release.
+  * drisw-move-zink-down.diff: Dropped, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 08 Apr 2021 13:57:35 +0300
+
+mesa (21.0.1-2) experimental; urgency=medium
+
+  * Move zink down the list below the sw drivers. (LP: #1920665)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 07 Apr 2021 13:18:01 +0300
+
+mesa (21.0.1-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 25 Mar 2021 21:12:09 +0200
+
+mesa (21.0.0-1) experimental; urgency=medium
+
+  * New upstream release. (LP: #1917763)
+  * control: Add directx-headers-dev to build-depends for amd64 and arm64
+    on Linux, which is what WSL2 currently supports.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 15 Mar 2021 19:22:33 +0200
+
+mesa (21.0.0~rc5-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 22 Feb 2021 10:32:24 +0200
+
+mesa (21.0.0~rc4-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 08 Feb 2021 13:01:20 +0200
+
+mesa (21.0.0~rc3-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sat, 30 Jan 2021 12:25:57 +0200
+
+mesa (21.0.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * lavapipe-Defer-lavapipe-warning-to-CreateDevice.patch: Dropped,
+    upstream.
+  * rules: Fix osmesa confflag to use a boolean.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 22 Jan 2021 13:44:42 +0200
+
+mesa (20.3.5-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 25 Mar 2021 12:11:46 +0200
+>>>>>>> debian/experimental
 
 mesa (20.3.4-1) unstable; urgency=medium
 

@@ -30,6 +30,7 @@
 #include <sys/mman.h>
 
 #include "msm_kgsl.h"
+#include "vk_util.h"
 
 struct tu_syncobj {
    struct vk_object_base base;
@@ -205,7 +206,7 @@ tu_enumerate_devices(struct tu_instance *instance)
 
    struct tu_physical_device *device = &instance->physical_devices[0];
 
-   if (instance->enabled_extensions.KHR_display)
+   if (instance->vk.enabled_extensions.KHR_display)
       return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
                        "I can't KHR_display");
 
@@ -229,7 +230,6 @@ tu_enumerate_devices(struct tu_instance *instance)
    if (instance->debug_flags & TU_DEBUG_STARTUP)
       mesa_logi("Found compatible device '%s'.", path);
 
-   vk_object_base_init(NULL, &device->base, VK_OBJECT_TYPE_PHYSICAL_DEVICE);
    device->instance = instance;
    device->master_fd = -1;
    device->local_fd = fd;
@@ -240,6 +240,10 @@ tu_enumerate_devices(struct tu_instance *instance)
       ((info.chip_id >>  8) & 0xff);
    device->gmem_size = info.gmem_sizebytes;
    device->gmem_base = gmem_iova;
+
+   device->heap.size = tu_get_system_heap_size();
+   device->heap.used = 0u;
+   device->heap.flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 
    if (tu_physical_device_init(device, instance) != VK_SUCCESS)
       goto fail;
@@ -336,10 +340,16 @@ tu_QueueSubmit(VkQueue _queue,
    for (uint32_t i = 0; i < submitCount; ++i) {
       const VkSubmitInfo *submit = pSubmits + i;
 
+      const VkPerformanceQuerySubmitInfoKHR *perf_info =
+         vk_find_struct_const(pSubmits[i].pNext,
+                              PERFORMANCE_QUERY_SUBMIT_INFO_KHR);
+
       uint32_t entry_count = 0;
       for (uint32_t j = 0; j < submit->commandBufferCount; ++j) {
          TU_FROM_HANDLE(tu_cmd_buffer, cmdbuf, submit->pCommandBuffers[j]);
          entry_count += cmdbuf->cs.entry_count;
+         if (perf_info)
+            entry_count++;
       }
 
       max_entry_count = MAX2(max_entry_count, entry_count);
@@ -355,10 +365,28 @@ tu_QueueSubmit(VkQueue _queue,
    for (uint32_t i = 0; i < submitCount; ++i) {
       const VkSubmitInfo *submit = pSubmits + i;
       uint32_t entry_idx = 0;
+      const VkPerformanceQuerySubmitInfoKHR *perf_info =
+         vk_find_struct_const(pSubmits[i].pNext,
+                              PERFORMANCE_QUERY_SUBMIT_INFO_KHR);
+
 
       for (uint32_t j = 0; j < submit->commandBufferCount; j++) {
          TU_FROM_HANDLE(tu_cmd_buffer, cmdbuf, submit->pCommandBuffers[j]);
          struct tu_cs *cs = &cmdbuf->cs;
+
+         if (perf_info) {
+            struct tu_cs_entry *perf_cs_entry =
+               &cmdbuf->device->perfcntrs_pass_cs_entries[perf_info->counterPassIndex];
+
+            cmds[entry_idx++] = (struct kgsl_command_object) {
+               .offset = perf_cs_entry->offset,
+               .gpuaddr = perf_cs_entry->bo->iova,
+               .size = perf_cs_entry->size,
+               .flags = KGSL_CMDLIST_IB,
+               .id = perf_cs_entry->bo->gem_handle,
+            };
+         }
+
          for (unsigned k = 0; k < cs->entry_count; k++) {
             cmds[entry_idx++] = (struct kgsl_command_object) {
                .offset = cs->entries[k].offset,

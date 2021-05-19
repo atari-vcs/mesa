@@ -145,6 +145,12 @@ util_fill_rect(ubyte * dst,
          dst += dst_stride;
       }
       break;
+   case 8:
+      for (i = 0; i < height; i++) {
+         util_memset64(dst, ((uint64_t *)uc)[0], width);
+         dst += dst_stride;
+      }
+      break;
    default:
       for (i = 0; i < height; i++) {
          ubyte *row = dst;
@@ -489,9 +495,7 @@ util_fill_zs_rect(ubyte *dst_map,
    case 8:
       if (!need_rmw) {
          for (i = 0; i < height; i++) {
-            uint64_t *row = (uint64_t *)dst_map;
-            for (j = 0; j < width; j++)
-               *row++ = zstencil;
+            util_memset64(dst_map, zstencil, width);
             dst_map += dst_stride;
          }
       }
@@ -765,7 +769,8 @@ util_can_blit_via_copy_region(const struct pipe_blit_info *blit,
        blit->filter != PIPE_TEX_FILTER_NEAREST ||
        blit->scissor_enable ||
        blit->num_window_rectangles > 0 ||
-       blit->alpha_blend) {
+       blit->alpha_blend ||
+       blit->render_condition_enable) {
       return FALSE;
    }
 

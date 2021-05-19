@@ -436,7 +436,7 @@ static void compute_memory_move_item(struct compute_memory_pool *pool,
 
 	if (pool->item_list != item->link.prev) {
 		ASSERTED struct compute_memory_item *prev;
-		prev = container_of(item->link.prev, item, link);
+		prev = container_of(item->link.prev, struct compute_memory_item, link);
 		assert(prev->start_in_dw + prev->size_in_dw <= new_start_in_dw);
 	}
 
@@ -495,7 +495,7 @@ static void compute_memory_move_item(struct compute_memory_pool *pool,
 }
 
 /**
- * Frees the memory asociated to the item with id \a id from the pool.
+ * Frees the memory associated to the item with id \a id from the pool.
  * \param id	The id of the item to be freed.
  */
 void compute_memory_free(struct compute_memory_pool* pool, int64_t id)

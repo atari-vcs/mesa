@@ -262,7 +262,7 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
          }
 
          struct drm_nouveau_svm_init svm_args = {
-            .unmanaged_addr = (uint64_t)screen->svm_cutout,
+            .unmanaged_addr = (uintptr_t)screen->svm_cutout,
             .unmanaged_size = screen->svm_cutout_size,
          };
 
@@ -273,6 +273,18 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
             os_munmap(screen->svm_cutout, screen->svm_cutout_size);
          break;
       } while ((start + screen->svm_cutout_size) < BITFIELD64_MASK(limit_bit));
+   }
+
+   switch (dev->chipset) {
+   case 0x0ea: /* TK1, GK20A */
+   case 0x12b: /* TX1, GM20B */
+   case 0x13b: /* TX2, GP10B */
+      screen->tegra_sector_layout = true;
+      break;
+   default:
+      /* Xavier's GPU and everything else */
+      screen->tegra_sector_layout = false;
+      break;
    }
 
    /*

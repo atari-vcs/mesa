@@ -33,6 +33,7 @@
 
 #include "sid.h"
 #include "sid_tables.h"
+#include "util/compiler.h"
 #include "util/memstream.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -393,7 +394,7 @@ static void ac_parse_packet3(FILE *f, uint32_t header, struct ac_ib_parser *ib,
       ac_dump_reg(f, ib->chip_class, R_411_CP_DMA_WORD1, ac_ib_get(ib), ~0);
       ac_dump_reg(f, ib->chip_class, R_412_CP_DMA_WORD2, ac_ib_get(ib), ~0);
       ac_dump_reg(f, ib->chip_class, R_413_CP_DMA_WORD3, ac_ib_get(ib), ~0);
-      ac_dump_reg(f, ib->chip_class, R_414_COMMAND, ac_ib_get(ib), ~0);
+      ac_dump_reg(f, ib->chip_class, R_415_COMMAND, ac_ib_get(ib), ~0);
       break;
    case PKT3_DMA_DATA:
       ac_dump_reg(f, ib->chip_class, R_500_DMA_DATA_WORD0, ac_ib_get(ib), ~0);
@@ -401,7 +402,7 @@ static void ac_parse_packet3(FILE *f, uint32_t header, struct ac_ib_parser *ib,
       ac_dump_reg(f, ib->chip_class, R_502_SRC_ADDR_HI, ac_ib_get(ib), ~0);
       ac_dump_reg(f, ib->chip_class, R_503_DST_ADDR_LO, ac_ib_get(ib), ~0);
       ac_dump_reg(f, ib->chip_class, R_504_DST_ADDR_HI, ac_ib_get(ib), ~0);
-      ac_dump_reg(f, ib->chip_class, R_414_COMMAND, ac_ib_get(ib), ~0);
+      ac_dump_reg(f, ib->chip_class, R_415_COMMAND, ac_ib_get(ib), ~0);
       break;
    case PKT3_INDIRECT_BUFFER_SI:
    case PKT3_INDIRECT_BUFFER_CONST:
@@ -511,7 +512,7 @@ static void ac_do_parse_ib(FILE *f, struct ac_ib_parser *ib)
             fprintf(f, COLOR_GREEN "NOP (type 2)" COLOR_RESET "\n");
             break;
          }
-         /* fall through */
+         FALLTHROUGH;
       default:
          fprintf(f, "Unknown packet type %i\n", type);
          break;
@@ -639,6 +640,9 @@ void ac_parse_ib(FILE *f, uint32_t *ib, int num_dw, const int *trace_ids, unsign
 bool ac_vm_fault_occured(enum chip_class chip_class, uint64_t *old_dmesg_timestamp,
                          uint64_t *out_addr)
 {
+#ifdef _WIN32
+   return false;
+#else
    char line[2000];
    unsigned sec, usec;
    int progress = 0;
@@ -733,6 +737,7 @@ bool ac_vm_fault_occured(enum chip_class chip_class, uint64_t *old_dmesg_timesta
       *old_dmesg_timestamp = dmesg_timestamp;
 
    return fault;
+#endif
 }
 
 static int compare_wave(const void *p1, const void *p2)
@@ -773,6 +778,9 @@ static int compare_wave(const void *p1, const void *p2)
 unsigned ac_get_wave_info(enum chip_class chip_class,
                           struct ac_wave_info waves[AC_MAX_WAVES_PER_CHIP])
 {
+#ifdef _WIN32
+   return 0;
+#else
    char line[2000], cmd[128];
    unsigned num_waves = 0;
 
@@ -808,4 +816,5 @@ unsigned ac_get_wave_info(enum chip_class chip_class,
 
    pclose(p);
    return num_waves;
+#endif
 }

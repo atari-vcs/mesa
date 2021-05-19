@@ -62,13 +62,13 @@ enum pipe_format
 st_mesa_format_to_pipe_format(const struct st_context *st,
                               mesa_format mesaFormat)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
 
    /* The destination RGBA format mustn't be changed, because it's also
     * a destination format of the unpack/decompression function.
     */
    if (mesaFormat == MESA_FORMAT_ETC1_RGB8 && !st->has_etc1)
-      return PIPE_FORMAT_R8G8B8A8_UNORM;
+      return st->transcode_etc ? PIPE_FORMAT_DXT1_RGB : PIPE_FORMAT_R8G8B8A8_UNORM;
 
    /* ETC2 formats are emulated as uncompressed ones.
     * The destination formats mustn't be changed, because they are also
@@ -82,13 +82,15 @@ st_mesa_format_to_pipe_format(const struct st_context *st,
 
       switch (mesaFormat) {
       case MESA_FORMAT_ETC2_RGB8:
-         return PIPE_FORMAT_R8G8B8A8_UNORM;
+         return st->transcode_etc ? PIPE_FORMAT_DXT1_RGB : PIPE_FORMAT_R8G8B8A8_UNORM;
       case MESA_FORMAT_ETC2_SRGB8:
-         return has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
+         return st->transcode_etc ? PIPE_FORMAT_DXT1_SRGB :
+                has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
       case MESA_FORMAT_ETC2_RGBA8_EAC:
-         return PIPE_FORMAT_R8G8B8A8_UNORM;
+         return st->transcode_etc ? PIPE_FORMAT_DXT5_RGBA : PIPE_FORMAT_R8G8B8A8_UNORM;
       case MESA_FORMAT_ETC2_SRGB8_ALPHA8_EAC:
-         return has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
+         return st->transcode_etc ? PIPE_FORMAT_DXT5_SRGBA :
+                has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
       case MESA_FORMAT_ETC2_R11_EAC:
          return PIPE_FORMAT_R16_UNORM;
       case MESA_FORMAT_ETC2_RG11_EAC:
@@ -98,9 +100,10 @@ st_mesa_format_to_pipe_format(const struct st_context *st,
       case MESA_FORMAT_ETC2_SIGNED_RG11_EAC:
          return PIPE_FORMAT_R16G16_SNORM;
       case MESA_FORMAT_ETC2_RGB8_PUNCHTHROUGH_ALPHA1:
-         return PIPE_FORMAT_R8G8B8A8_UNORM;
+         return st->transcode_etc ? PIPE_FORMAT_DXT1_RGBA : PIPE_FORMAT_R8G8B8A8_UNORM;
       case MESA_FORMAT_ETC2_SRGB8_PUNCHTHROUGH_ALPHA1:
-         return has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
+         return st->transcode_etc ? PIPE_FORMAT_DXT1_SRGBA :
+                has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
       default:
          unreachable("Unknown ETC2 format");
       }
@@ -426,6 +429,10 @@ static const struct format_mapping format_map[] = {
    {
       { GL_SR8_EXT, 0 },
       { PIPE_FORMAT_R8_SRGB, 0 }
+   },
+   {
+      { GL_SRG8_EXT, 0 },
+      { PIPE_FORMAT_R8G8_SRGB, 0 }
    },
 
    /* 16-bit float formats */
@@ -1101,7 +1108,7 @@ st_choose_format(struct st_context *st, GLenum internalFormat,
                  unsigned storage_sample_count,
                  unsigned bindings, bool swap_bytes, bool allow_dxt)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
    unsigned i;
    int j;
    enum pipe_format pf;
@@ -1215,7 +1222,7 @@ enum pipe_format
 st_choose_matching_format(struct st_context *st, unsigned bind,
                           GLenum format, GLenum type, GLboolean swapBytes)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
 
    if (swapBytes && !_mesa_swap_bytes_in_type_enum(&type))
       return PIPE_FORMAT_NONE;

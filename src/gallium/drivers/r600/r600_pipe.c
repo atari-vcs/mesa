@@ -55,6 +55,7 @@ static const struct debug_named_value r600_debug_options[] = {
 	{ "sbnofallback", DBG_SB_NO_FALLBACK, "Abort on errors instead of fallback" },
 	{ "sbdisasm", DBG_SB_DISASM, "Use sb disassembler for shader dumps" },
 	{ "sbsafemath", DBG_SB_SAFEMATH, "Disable unsafe math optimizations" },
+        { "nirsb", DBG_NIR_SB, "Enable NIR with SB optimizer"},
 
 	DEBUG_NAMED_VALUE_END /* must be last */
 };
@@ -81,7 +82,7 @@ static void r600_destroy_context(struct pipe_context *context)
 	if (rctx->append_fence)
 		pipe_resource_reference((struct pipe_resource**)&rctx->append_fence, NULL);
 	for (sh = 0; sh < PIPE_SHADER_TYPES; sh++) {
-		rctx->b.b.set_constant_buffer(&rctx->b.b, sh, R600_BUFFER_INFO_CONST_BUFFER, NULL);
+		rctx->b.b.set_constant_buffer(&rctx->b.b, sh, R600_BUFFER_INFO_CONST_BUFFER, false, NULL);
 		free(rctx->driver_consts[sh].constants);
 	}
 
@@ -113,14 +114,12 @@ static void r600_destroy_context(struct pipe_context *context)
 
 	for (sh = 0; sh < PIPE_SHADER_TYPES; ++sh)
 		for (i = 0; i < PIPE_MAX_CONSTANT_BUFFERS; ++i)
-			rctx->b.b.set_constant_buffer(context, sh, i, NULL);
+			rctx->b.b.set_constant_buffer(context, sh, i, false, NULL);
 
 	if (rctx->blitter) {
 		util_blitter_destroy(rctx->blitter);
 	}
-	if (rctx->allocator_fetch_shader) {
-		u_suballocator_destroy(rctx->allocator_fetch_shader);
-	}
+	u_suballocator_destroy(&rctx->allocator_fetch_shader);
 
 	r600_release_command_buffer(&rctx->start_cs_cmd);
 
@@ -211,15 +210,12 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen,
 		goto fail;
 	}
 
-	rctx->b.gfx.cs = ws->cs_create(rctx->b.ctx, RING_GFX,
-				       r600_context_gfx_flush, rctx, false);
+	ws->cs_create(&rctx->b.gfx.cs, rctx->b.ctx, RING_GFX,
+                      r600_context_gfx_flush, rctx, false);
 	rctx->b.gfx.flush = r600_context_gfx_flush;
 
-	rctx->allocator_fetch_shader =
-		u_suballocator_create(&rctx->b.b, 64 * 1024,
-				      0, PIPE_USAGE_DEFAULT, 0, FALSE);
-	if (!rctx->allocator_fetch_shader)
-		goto fail;
+	u_suballocator_init(&rctx->allocator_fetch_shader, &rctx->b.b, 64 * 1024,
+                            0, PIPE_USAGE_DEFAULT, 0, FALSE);
 
 	rctx->isa = calloc(1, sizeof(struct r600_isa));
 	if (!rctx->isa || r600_isa_init(rctx, rctx->isa))
@@ -250,7 +246,7 @@ fail:
 }
 
 static bool is_nir_enabled(struct r600_common_screen *screen) {
-   return (screen->debug_flags & DBG_NIR &&
+   return ((screen->debug_flags & DBG_NIR_PREFERRED) &&
        screen->family >= CHIP_CEDAR &&
        screen->family < CHIP_CAYMAN);
 }
@@ -327,6 +323,9 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
         case PIPE_CAP_NIR_ATOMICS_AS_DEREF:
 		return 1;
 
+	case PIPE_CAP_SHAREABLE_SHADERS:
+		return 0;
+
 	case PIPE_CAP_MAX_TEXTURE_UPLOAD_MEMORY_BUDGET:
 		/* Optimal number for good TexSubImage performance on Polaris10. */
 		return 64 * 1024 * 1024;
@@ -357,11 +356,11 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 		return 256;
 
 	case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
-		return 1;
+		return 4;
 
 	case PIPE_CAP_GLSL_FEATURE_LEVEL:
 		if (family >= CHIP_CEDAR)
-		   return 430;
+		   return is_nir_enabled(&rscreen->b) ? 450 : 430;
 		/* pre-evergreen geom shaders need newer kernel */
 		if (rscreen->b.info.drm_minor >= 37)
 		   return 330;
@@ -412,13 +411,21 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 	case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
 		return 0;
 
+        case PIPE_CAP_INT64:
 	case PIPE_CAP_DOUBLES:
 		if (rscreen->b.family == CHIP_ARUBA ||
 		    rscreen->b.family == CHIP_CAYMAN ||
 		    rscreen->b.family == CHIP_CYPRESS ||
 		    rscreen->b.family == CHIP_HEMLOCK)
 			return 1;
+                if (is_nir_enabled(&rscreen->b))
+                   return 1;
 		return 0;
+        case PIPE_CAP_INT64_DIVMOD:
+           /* it is actually not supported, but the nir lowering hdanles this corectly wheras
+            * the glsl lowering path seems to not initialize the buildins correctly.
+            */
+           return is_nir_enabled(&rscreen->b);
 	case PIPE_CAP_CULL_DISTANCE:
 		return 1;
 
@@ -611,6 +618,7 @@ static int r600_get_shader_param(struct pipe_screen* pscreen,
 	case PIPE_SHADER_CAP_INT64_ATOMICS:
 	case PIPE_SHADER_CAP_FP16:
         case PIPE_SHADER_CAP_FP16_DERIVATIVES:
+	case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
         case PIPE_SHADER_CAP_INT16:
         case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
 		return 0;

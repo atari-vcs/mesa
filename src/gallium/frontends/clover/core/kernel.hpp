@@ -27,6 +27,7 @@
 #include <memory>
 
 #include "core/object.hpp"
+#include "core/printf.hpp"
 #include "core/program.hpp"
 #include "core/memory.hpp"
 #include "core/sampler.hpp"
@@ -53,6 +54,7 @@ namespace clover {
 
          kernel &kern;
          intrusive_ptr<command_queue> q;
+         std::unique_ptr<printf_handler> print_handler;
 
          std::vector<uint8_t> input;
          std::vector<void *> samplers;
@@ -165,6 +167,8 @@ namespace clover {
 
       class global_argument : public argument {
       public:
+         global_argument();
+
          virtual void set(size_t size, const void *value);
          virtual void set_svm(const void *value);
          virtual void bind(exec_context &ctx,
@@ -231,6 +235,8 @@ namespace clover {
 
       class sampler_argument : public argument {
       public:
+         sampler_argument();
+
          virtual void set(size_t size, const void *value);
          virtual void bind(exec_context &ctx,
                            const module::argument &marg);

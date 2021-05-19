@@ -32,6 +32,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
+#include "util/u_draw.h"
 #include "util/u_inlines.h"
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
@@ -98,11 +99,14 @@ iris_update_draw_info(struct iris_context *ice,
       }
    }
 
+   /* Track restart_index changes only if primitive_restart is true */
+   const unsigned cut_index = info->primitive_restart ? info->restart_index :
+                                                        ice->state.cut_index;
    if (ice->state.primitive_restart != info->primitive_restart ||
-       ice->state.cut_index != info->restart_index) {
+       ice->state.cut_index != cut_index) {
       ice->state.dirty |= IRIS_DIRTY_VF;
       ice->state.primitive_restart = info->primitive_restart;
-      ice->state.cut_index = info->restart_index;
+      ice->state.cut_index = cut_index;
    }
 }
 
@@ -111,22 +115,24 @@ iris_update_draw_info(struct iris_context *ice,
  */
 static void
 iris_update_draw_parameters(struct iris_context *ice,
-                            const struct pipe_draw_info *info)
+                            const struct pipe_draw_info *info,
+                            const struct pipe_draw_indirect_info *indirect,
+                            const struct pipe_draw_start_count *draw)
 {
    bool changed = false;
 
    if (ice->state.vs_uses_draw_params) {
       struct iris_state_ref *draw_params = &ice->draw.draw_params;
 
-      if (info->indirect) {
-         pipe_resource_reference(&draw_params->res, info->indirect->buffer);
+      if (indirect && indirect->buffer) {
+         pipe_resource_reference(&draw_params->res, indirect->buffer);
          draw_params->offset =
-            info->indirect->offset + (info->index_size ? 12 : 8);
+            indirect->offset + (info->index_size ? 12 : 8);
 
          changed = true;
          ice->draw.params_valid = false;
       } else {
-         int firstvertex = info->index_size ? info->index_bias : info->start;
+         int firstvertex = info->index_size ? info->index_bias : draw->start;
 
          if (!ice->draw.params_valid ||
              ice->draw.params.firstvertex != firstvertex ||
@@ -171,12 +177,15 @@ iris_update_draw_parameters(struct iris_context *ice,
 
 static void
 iris_indirect_draw_vbo(struct iris_context *ice,
-                       const struct pipe_draw_info *dinfo)
+                       const struct pipe_draw_info *dinfo,
+                       const struct pipe_draw_indirect_info *dindirect,
+                       const struct pipe_draw_start_count *draw)
 {
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
    struct pipe_draw_info info = *dinfo;
+   struct pipe_draw_indirect_info indirect = *dindirect;
 
-   if (info.indirect->indirect_draw_count &&
+   if (indirect.indirect_draw_count &&
        ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT) {
       /* Upload MI_PREDICATE_RESULT to GPR15.*/
       batch->screen->vtbl.load_register_reg64(batch, CS_GPR(15), MI_PREDICATE_RESULT);
@@ -185,22 +194,22 @@ iris_indirect_draw_vbo(struct iris_context *ice,
    const uint64_t orig_dirty = ice->state.dirty;
    const uint64_t orig_stage_dirty = ice->state.stage_dirty;
 
-   for (int i = 0; i < info.indirect->draw_count; i++) {
+   for (int i = 0; i < indirect.draw_count; i++) {
       info.drawid = i;
 
       iris_batch_maybe_flush(batch, 1500);
 
-      iris_update_draw_parameters(ice, &info);
+      iris_update_draw_parameters(ice, &info, &indirect, draw);
 
-      batch->screen->vtbl.upload_render_state(ice, batch, &info);
+      batch->screen->vtbl.upload_render_state(ice, batch, &info, &indirect, draw);
 
       ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_RENDER;
       ice->state.stage_dirty &= ~IRIS_ALL_STAGE_DIRTY_FOR_RENDER;
 
-      info.indirect->offset += info.indirect->stride;
+      indirect.offset += indirect.stride;
    }
 
-   if (info.indirect->indirect_draw_count &&
+   if (indirect.indirect_draw_count &&
        ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT) {
       /* Restore MI_PREDICATE_RESULT. */
       batch->screen->vtbl.load_register_reg64(batch, MI_PREDICATE_RESULT, CS_GPR(15));
@@ -213,23 +222,36 @@ iris_indirect_draw_vbo(struct iris_context *ice,
 
 static void
 iris_simple_draw_vbo(struct iris_context *ice,
-                     const struct pipe_draw_info *draw)
+                     const struct pipe_draw_info *draw,
+                     const struct pipe_draw_indirect_info *indirect,
+                     const struct pipe_draw_start_count *sc)
 {
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
 
    iris_batch_maybe_flush(batch, 1500);
 
-   iris_update_draw_parameters(ice, draw);
+   iris_update_draw_parameters(ice, draw, indirect, sc);
 
-   batch->screen->vtbl.upload_render_state(ice, batch, draw);
+   batch->screen->vtbl.upload_render_state(ice, batch, draw, indirect, sc);
 }
 
 /**
  * The pipe->draw_vbo() driver hook.  Performs a draw on the GPU.
  */
 void
-iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
+iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
+              const struct pipe_draw_indirect_info *indirect,
+              const struct pipe_draw_start_count *draws,
+              unsigned num_draws)
 {
+   if (num_draws > 1) {
+      util_draw_multi(ctx, info, indirect, draws, num_draws);
+      return;
+   }
+
+   if (!indirect && (!draws[0].count || !info->instance_count))
+      return;
+
    struct iris_context *ice = (struct iris_context *) ctx;
    struct iris_screen *screen = (struct iris_screen*)ice->ctx.screen;
    const struct gen_device_info *devinfo = &screen->devinfo;
@@ -238,18 +260,15 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
    if (ice->state.predicate == IRIS_PREDICATE_STATE_DONT_RENDER)
       return;
 
-   /* We can't safely re-emit 3DSTATE_SO_BUFFERS because it may zero the
-    * write offsets, changing the behavior.
-    */
    if (INTEL_DEBUG & DEBUG_REEMIT) {
-      ice->state.dirty |= IRIS_ALL_DIRTY_FOR_RENDER & ~IRIS_DIRTY_SO_BUFFERS;
+      ice->state.dirty |= IRIS_ALL_DIRTY_FOR_RENDER;
       ice->state.stage_dirty |= IRIS_ALL_STAGE_DIRTY_FOR_RENDER;
    }
 
    iris_update_draw_info(ice, info);
 
-   if (devinfo->gen == 9)
-      gen9_toggle_preemption(ice, batch, info);
+   if (devinfo->ver == 9)
+      gfx9_toggle_preemption(ice, batch, info);
 
    iris_update_compiled_shaders(ice);
 
@@ -269,10 +288,10 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
 
    iris_handle_always_flush_cache(batch);
 
-   if (info->indirect)
-      iris_indirect_draw_vbo(ice, info);
+   if (indirect && indirect->buffer)
+      iris_indirect_draw_vbo(ice, info, indirect, &draws[0]);
    else
-      iris_simple_draw_vbo(ice, info);
+      iris_simple_draw_vbo(ice, info, indirect, &draws[0]);
 
    iris_handle_always_flush_cache(batch);
 

@@ -75,6 +75,10 @@ struct radeon_info {
    bool has_tc_compat_zrange_bug;
    bool has_msaa_sample_loc_bug;
    bool has_ls_vgpr_init_bug;
+   bool has_zero_index_buffer_bug;
+   bool has_image_load_dcc_bug;
+   bool has_32bit_predication;
+   bool has_3d_cube_border_color_mipmap;
 
    /* Display features. */
    /* There are 2 display DCC codepaths, because display expects unaligned DCC. */
@@ -86,6 +90,8 @@ struct radeon_info {
    /* Memory info. */
    uint32_t pte_fragment_size;
    uint32_t gart_page_size;
+   uint32_t gart_size_kb;
+   uint32_t vram_size_kb;
    uint64_t gart_size;
    uint64_t vram_size;
    uint64_t vram_vis_size;
@@ -97,15 +103,18 @@ struct radeon_info {
    uint32_t min_alloc_size;
    uint32_t address32_hi;
    bool has_dedicated_vram;
+   bool all_vram_visible;
+   bool smart_access_memory;
    bool has_l2_uncached;
    bool r600_has_virtual_memory;
-   uint32_t num_sdp_interfaces;
+   uint32_t max_tcc_blocks;
    uint32_t num_tcc_blocks;
    uint32_t tcc_cache_line_size;
-   bool tcc_harvested;
+   bool tcc_rb_non_coherent; /* whether L2 inv is needed for render->texture transitions */
    unsigned pc_lines;
    uint32_t lds_size_per_workgroup;
-   uint32_t lds_granularity;
+   uint32_t lds_alloc_granularity;
+   uint32_t lds_encode_granularity;
    uint32_t max_memory_clock;
    uint32_t ce_ram_size;
    uint32_t l1_cache_size;
@@ -127,6 +136,16 @@ struct radeon_info {
    uint32_t uvd_fw_version;
    uint32_t vce_fw_version;
    uint32_t vce_harvest_config;
+   struct video_caps_info {
+      struct {
+         uint32_t valid;
+         uint32_t max_width;
+         uint32_t max_height;
+         uint32_t max_pixels_per_frame;
+         uint32_t max_level;
+         uint32_t pad;
+      } codec_info[8]; /* the number of available codecs */
+   } dec_caps, enc_caps;
 
    /* Kernel & winsys capabilities. */
    uint32_t drm_major; /* version */
@@ -135,10 +154,8 @@ struct radeon_info {
    bool is_amdgpu;
    bool has_userptr;
    bool has_syncobj;
-   bool has_syncobj_wait_for_submit;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;
-   bool has_ctx_priority;
    bool has_local_buffers;
    bool kernel_flushes_hdp_before_ib;
    bool htile_cmask_support_1d_tiling;
@@ -158,6 +175,7 @@ struct radeon_info {
    /* Whether SR-IOV is enabled or amdgpu.mcbp=1 was set on the kernel command line. */
    bool mid_command_buffer_preemption_enabled;
    bool has_tmz_support;
+   bool kernel_has_modifiers;
 
    /* Shader cores. */
    uint32_t cu_mask[4][2];
@@ -168,7 +186,7 @@ struct radeon_info {
    uint32_t min_good_cu_per_sa; /* min != max if SAs have different # of CUs */
    uint32_t max_se;             /* number of shader engines incl. disabled ones */
    uint32_t num_se;             /* number of enabled shader engines */
-   uint32_t max_sh_per_se;      /* shader arrays per shader engine */
+   uint32_t max_sa_per_se;      /* shader arrays per shader engine */
    uint32_t max_wave64_per_simd;
    uint32_t num_physical_sgprs_per_simd;
    uint32_t num_physical_wave64_vgprs_per_simd;
@@ -187,9 +205,10 @@ struct radeon_info {
    uint32_t r600_gb_backend_map; /* R600 harvest config */
    bool r600_gb_backend_map_valid;
    uint32_t r600_num_banks;
+   uint32_t mc_arb_ramcfg;
    uint32_t gb_addr_config;
    uint32_t pa_sc_tile_steering_override; /* CLEAR_STATE also sets this */
-   uint32_t num_render_backends;
+   uint32_t max_render_backends;  /* number of render backends incl. disabled ones */
    uint32_t num_tile_pipes; /* pipe count from PIPE_CONFIG */
    uint32_t pipe_interleave_bytes;
    uint32_t enabled_rb_mask; /* GCN harvest config */

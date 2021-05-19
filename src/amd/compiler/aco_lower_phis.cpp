@@ -103,13 +103,13 @@ Operand get_ssa(Program *program, unsigned block_idx, ssa_state *state, bool bef
 
 void insert_before_logical_end(Block *block, aco_ptr<Instruction> instr)
 {
-   auto IsLogicalEnd = [] (const aco_ptr<Instruction>& instr) -> bool {
-      return instr->opcode == aco_opcode::p_logical_end;
+   auto IsLogicalEnd = [] (const aco_ptr<Instruction>& inst) -> bool {
+      return inst->opcode == aco_opcode::p_logical_end;
    };
    auto it = std::find_if(block->instructions.crbegin(), block->instructions.crend(), IsLogicalEnd);
 
    if (it == block->instructions.crend()) {
-      assert(block->instructions.back()->format == Format::PSEUDO_BRANCH);
+      assert(block->instructions.back()->isBranch());
       block->instructions.insert(std::prev(block->instructions.end()), std::move(instr));
    } else {
       block->instructions.insert(std::prev(it.base()), std::move(instr));
@@ -132,8 +132,8 @@ void build_merge_code(Program *program, Block *block, Definition dst, Operand pr
       return;
    }
 
-   bool prev_is_constant = prev.isConstant() && prev.constantValue64(true) + 1u < 2u;
-   bool cur_is_constant = cur.isConstant() && cur.constantValue64(true) + 1u < 2u;
+   bool prev_is_constant = prev.isConstant() && prev.constantValue() + 1u < 2u;
+   bool cur_is_constant = cur.isConstant() && cur.constantValue() + 1u < 2u;
 
    if (!prev_is_constant) {
       if (!cur_is_constant) {
@@ -141,22 +141,22 @@ void build_merge_code(Program *program, Block *block, Definition dst, Operand pr
          bld.sop2(Builder::s_andn2, Definition(tmp1), bld.def(s1, scc), prev, Operand(exec, bld.lm));
          bld.sop2(Builder::s_and, Definition(tmp2), bld.def(s1, scc), cur, Operand(exec, bld.lm));
          bld.sop2(Builder::s_or, dst, bld.def(s1, scc), tmp1, tmp2);
-      } else if (cur.constantValue64(true)) {
+      } else if (cur.constantValue()) {
          bld.sop2(Builder::s_or, dst, bld.def(s1, scc), prev, Operand(exec, bld.lm));
       } else {
          bld.sop2(Builder::s_andn2, dst, bld.def(s1, scc), prev, Operand(exec, bld.lm));
       }
-   } else if (prev.constantValue64(true)) {
+   } else if (prev.constantValue()) {
       if (!cur_is_constant)
          bld.sop2(Builder::s_orn2, dst, bld.def(s1, scc), cur, Operand(exec, bld.lm));
-      else if (cur.constantValue64(true))
+      else if (cur.constantValue())
          bld.copy(dst, Operand(UINT32_MAX, bld.lm == s2));
       else
          bld.sop1(Builder::s_not, dst, bld.def(s1, scc), Operand(exec, bld.lm));
    } else {
       if (!cur_is_constant)
          bld.sop2(Builder::s_and, dst, bld.def(s1, scc), cur, Operand(exec, bld.lm));
-      else if (cur.constantValue64(true))
+      else if (cur.constantValue())
          bld.copy(dst, Operand(exec, bld.lm));
       else
          bld.copy(dst, Operand(0u, bld.lm == s2));
@@ -168,14 +168,14 @@ void lower_divergent_bool_phi(Program *program, ssa_state *state, Block *block, 
    Builder bld(program);
 
    if (!state->checked_preds_for_uniform) {
-      state->all_preds_uniform = !(block->kind & block_kind_merge);
+      state->all_preds_uniform = !(block->kind & block_kind_merge) &&
+                                 block->linear_preds.size() == block->logical_preds.size();
       for (unsigned pred : block->logical_preds)
          state->all_preds_uniform = state->all_preds_uniform && (program->blocks[pred].kind & block_kind_uniform);
       state->checked_preds_for_uniform = true;
    }
 
    if (state->all_preds_uniform) {
-      assert(block->logical_preds.size() == block->linear_preds.size());
       phi->opcode = aco_opcode::p_linear_phi;
       return;
    }

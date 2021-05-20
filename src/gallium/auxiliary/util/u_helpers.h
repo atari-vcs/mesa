@@ -40,12 +40,16 @@ extern "C" {
 void util_set_vertex_buffers_mask(struct pipe_vertex_buffer *dst,
                                   uint32_t *enabled_buffers,
                                   const struct pipe_vertex_buffer *src,
-                                  unsigned start_slot, unsigned count);
+                                  unsigned start_slot, unsigned count,
+                                  unsigned unbind_num_trailing_slots,
+                                  bool take_ownership);
 
 void util_set_vertex_buffers_count(struct pipe_vertex_buffer *dst,
                                    unsigned *dst_count,
                                    const struct pipe_vertex_buffer *src,
-                                   unsigned start_slot, unsigned count);
+                                   unsigned start_slot, unsigned count,
+                                   unsigned unbind_num_trailing_slots,
+                                   bool take_ownership);
 
 void util_set_shader_buffers_mask(struct pipe_shader_buffer *dst,
                                   uint32_t *enabled_buffers,
@@ -54,6 +58,7 @@ void util_set_shader_buffers_mask(struct pipe_shader_buffer *dst,
 
 bool util_upload_index_buffer(struct pipe_context *pipe,
                               const struct pipe_draw_info *info,
+                              const struct pipe_draw_start_count *draw,
                               struct pipe_resource **out_buffer,
                               unsigned *out_offset, unsigned alignment);
 

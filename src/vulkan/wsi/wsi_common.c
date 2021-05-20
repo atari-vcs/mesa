@@ -24,11 +24,11 @@
 #include "wsi_common_private.h"
 #include "util/macros.h"
 #include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/xmlconfig.h"
 #include "vk_util.h"
 
 #include <time.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -117,6 +117,12 @@ wsi_device_init(struct wsi_device *wsi,
       goto fail;
 #endif
 
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   result = wsi_win32_init_wsi(wsi, alloc, pdevice);
+   if (result != VK_SUCCESS)
+      goto fail;
+#endif
+
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    result = wsi_display_init_wsi(wsi, alloc, display_fd);
    if (result != VK_SUCCESS)
@@ -152,6 +158,7 @@ wsi_device_init(struct wsi_device *wsi,
    return VK_SUCCESS;
 #if defined(VK_USE_PLATFORM_XCB_KHR) || \
    defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
+   defined(VK_USE_PLATFORM_WIN32_KHR) || \
    defined(VK_USE_PLATFORM_DISPLAY_KHR)
 fail:
    wsi_device_finish(wsi, alloc);
@@ -168,6 +175,9 @@ wsi_device_finish(struct wsi_device *wsi,
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    wsi_wl_finish_wsi(wsi, alloc);
+#endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   wsi_win32_finish_wsi(wsi, alloc);
 #endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
    wsi_x11_finish_wsi(wsi, alloc);
@@ -671,7 +681,5 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 uint64_t
 wsi_common_get_current_time(void)
 {
-   struct timespec current;
-   clock_gettime(CLOCK_MONOTONIC, &current);
-   return current.tv_nsec + current.tv_sec * 1000000000ull;
+   return os_time_get_nano();
 }

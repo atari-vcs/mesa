@@ -35,9 +35,6 @@ subdir('lib')
 
 files_bifrost = files(
   'bifrost/cmdline.c',
-  'bifrost/test/bi_submit.c',
-  'bifrost/test/bi_interpret.c',
-  'bifrost/test/bi_test_pack.c',
 )
 
 bifrost_compiler = executable(
@@ -56,6 +53,7 @@ bifrost_compiler = executable(
   dependencies : [
     idep_nir,
     idep_mesautil,
+    idep_bi_opcodes_h,
     dep_libdrm,
   ],
   link_with : [

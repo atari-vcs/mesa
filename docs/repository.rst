@@ -74,8 +74,8 @@ Useful for people behind strict proxies
 
 You can use `personal access
 tokens <https://gitlab.freedesktop.org/profile/personal_access_tokens>`__
-to push over HTTPS if ssh will does not suit your needs. In this case,
-create a token, and put it in the URL as shown here:
+to push over HTTPS if ssh does not suit your needs. In this case, create
+a token, and put it in the URL as shown here:
 
 ::
 
@@ -150,7 +150,8 @@ Developer Git Tips
       git add <files to commit>
       git commit
 
-   to get your changes ready to push back into the fd.o repository.
+   to get your changes ready to push back into the freedesktop.org
+   repository.
 
    It is possible (and likely) that someone has changed master since you
    did your last pull. Even if your changes do not conflict with their

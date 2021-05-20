@@ -86,7 +86,7 @@ struct ac_shader_abi {
                                       LLVMValueRef vertex_index, LLVMValueRef param_index,
                                       unsigned driver_location, unsigned component,
                                       unsigned num_components,
-                                      bool load_inputs);
+                                      bool load_inputs, bool vertex_index_is_invoc_id);
 
    void (*store_tcs_outputs)(struct ac_shader_abi *abi,
                              LLVMValueRef vertex_index, LLVMValueRef param_index,
@@ -96,6 +96,12 @@ struct ac_shader_abi {
    LLVMValueRef (*load_tess_coord)(struct ac_shader_abi *abi);
 
    LLVMValueRef (*load_patch_vertices_in)(struct ac_shader_abi *abi);
+
+   LLVMValueRef (*load_ring_tess_offchip)(struct ac_shader_abi *abi);
+
+   LLVMValueRef (*load_ring_tess_factors)(struct ac_shader_abi *abi);
+
+   LLVMValueRef (*load_ring_esgs)(struct ac_shader_abi *abi);
 
    LLVMValueRef (*load_tess_level)(struct ac_shader_abi *abi, unsigned varying_id,
                                    bool load_default_state);
@@ -110,8 +116,9 @@ struct ac_shader_abi {
     * \param buffer the buffer as presented in NIR: this is the descriptor
     *               in Vulkan, and the buffer index in OpenGL/Gallium
     * \param write whether buffer contents will be written
+    * \param non_uniform whether the buffer descriptor is not assumed to be uniform
     */
-   LLVMValueRef (*load_ssbo)(struct ac_shader_abi *abi, LLVMValueRef buffer, bool write);
+   LLVMValueRef (*load_ssbo)(struct ac_shader_abi *abi, LLVMValueRef buffer, bool write, bool non_uniform);
 
    /**
     * Load a descriptor associated to a sampler.
@@ -145,7 +152,7 @@ struct ac_shader_abi {
 
    LLVMValueRef (*load_sample_mask_in)(struct ac_shader_abi *abi);
 
-   LLVMValueRef (*load_base_vertex)(struct ac_shader_abi *abi);
+   LLVMValueRef (*load_base_vertex)(struct ac_shader_abi *abi, bool non_indexed_is_zero);
 
    LLVMValueRef (*emit_fbfetch)(struct ac_shader_abi *abi);
 
@@ -165,6 +172,11 @@ struct ac_shader_abi {
 
    /* Clamp div by 0 (so it won't produce NaN) */
    bool clamp_div_by_zero;
+
+   /* Whether gl_FragCoord.z should be adjusted for VRS due to a hw bug on
+    * some GFX10.3 chips.
+    */
+   bool adjust_frag_coord_z;
 };
 
 #endif /* AC_SHADER_ABI_H */

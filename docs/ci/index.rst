@@ -14,7 +14,7 @@ modified and thus is unreliable).
 The CI runs a number of tests, from trivial build-testing to complex GPU rendering:
 
 - Build testing for a number of build systems, configurations and platforms
-- Sanity checks (``meson test`` & ``scons check``)
+- Sanity checks (``meson test``)
 - Some drivers (softpipe, llvmpipe, freedreno and panfrost) are also tested
   using `VK-GL-CTS <https://github.com/KhronosGroup/VK-GL-CTS>`__
 - Replay of application traces
@@ -102,17 +102,16 @@ pipeline backing up.  As a result, we require that the test farm be
 able to handle a whole pipeline's worth of jobs in less than 15 minutes
 (to compare, the build stage is about 10 minutes).
 
-If a test farm is short the HW to provide these guarantees, consider
-dropping tests to reduce runtime.
-``VK-GL-CTS/scripts/log/bottleneck_report.py`` can help you find what
-tests were slow in a ``results.qpa`` file.  Or, you can have a job with
-no ``parallel`` field set and:
+If a test farm is short the HW to provide these guarantees, consider dropping
+tests to reduce runtime.  dEQP job logs print the slowest tests at the end of
+the run, and piglit logs the runtime of tests in the results.json.bz2 in the
+artifacts.  Or, you can add the following to your job to only run some fraction
+(in this case, 1/10th) of the deqp tests.
 
 .. code-block:: yaml
 
     variables:
-      CI_NODE_INDEX: 1
-      CI_NODE_TOTAL: 10
+      DEQP_FRACTION: 10
 
 to just run 1/10th of the test list.
 
@@ -161,10 +160,10 @@ apt cache, and other such common pitfalls of building Docker images).
 
 When running a container job, the templates will look for an existing
 build of that image in the container registry under
-``FDO_DISTRIBUTION_TAG``.  If it's found it will be reused, and if
+``MESA_IMAGE_TAG``.  If it's found it will be reused, and if
 not, the associated `.gitlab-ci/containers/<jobname>.sh`` will be run
 to build it.  So, when developing any change to container build
-scripts, you need to update the associated ``FDO_DISTRIBUTION_TAG`` to
+scripts, you need to update the associated ``MESA_IMAGE_TAG`` to
 a new unique string.  We recommend using the current date plus some
 string related to your branch (so that if you rebase on someone else's
 container update from the same day, you will get a Git conflict

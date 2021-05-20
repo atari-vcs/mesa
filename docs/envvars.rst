@@ -23,6 +23,8 @@ LibGL environment variables
 ``LIBGL_SHOW_FPS``
    print framerate to stdout based on the number of ``glXSwapBuffers``
    calls per second.
+``LIBGL_DRI2_DISABLE``
+   disable DRI2 if set to ``true``.
 ``LIBGL_DRI3_DISABLE``
    disable DRI3 if set to ``true``.
 
@@ -67,7 +69,7 @@ Core Mesa environment variables
    specifies a file name for logging all errors, warnings, etc., rather
    than stderr
 ``MESA_TEX_PROG``
-   if set, implement conventional texture env modes with fragment
+   if set, implement conventional texture environment modes with fragment
    programs (intended for developers only)
 ``MESA_TNL_PROG``
    if set, implement conventional vertex transformation operations with
@@ -349,6 +351,11 @@ i945/i965 driver environment variables (non-Gallium)
    The success of assembly override would be signified by "Successfully
    overrode shader with sha1 <sha1>" in stderr replacing the original
    assembly.
+``INTEL_BLACKHOLE_DEFAULT``
+   if set to 1, true or yes, then the OpenGL implementation will
+   default ``GL_BLACKHOLE_RENDER_INTEL`` to true, thus disabling any
+   rendering.
+
 
 Radeon driver environment variables (radeon, r200, and r300g)
 -------------------------------------------------------------
@@ -447,7 +454,7 @@ Softpipe driver environment variables
    ``cs``
       Dump compute shader assembly to stderr
    ``no_rast``
-      rasterization is no-op'd. For profiling purposes.
+      rasterization is disabled. For profiling purposes.
    ``use_llvm``
       the softpipe driver will try to use LLVM JIT for vertex
       shading processing.
@@ -545,8 +552,6 @@ RADV driver environment variables
       enable LLVM compiler backend
    ``allbos``
       force all allocated buffers to be referenced in submissions
-   ``allentrypoints``
-      enable all device/instance entrypoints
    ``checkir``
       validate the LLVM IR before LLVM compiles the shader
    ``errors``
@@ -555,8 +560,10 @@ RADV driver environment variables
       Enables DCC,FMASK,CMASK,HTILE in situations where the driver supports it
       but normally does not deem it beneficial.
    ``hang``
-      enable GPU hangs detection and dump a report to $HOME/radv_dumps_<pid>
-      if a GPU hang is detected
+      enable GPU hangs detection and dump a report to
+      $HOME/radv_dumps_<pid>_<time> if a GPU hang is detected
+   ``img``
+      Print image info
    ``info``
       show GPU-related information
    ``invariantgeom``
@@ -572,6 +579,8 @@ RADV driver environment variables
       disable compute queue
    ``nodcc``
       disable Delta Color Compression (DCC) on images
+   ``nodisplaydcc``
+      disable Delta Color Compression (DCC) on displayable images
    ``nodynamicbounds``
       do not check OOB access for dynamic descriptors
    ``nofastclears``
@@ -586,8 +595,14 @@ RADV driver environment variables
       disable NGG for GFX10+
    ``nooutoforder``
       disable out-of-order rasterization
+   ``notccompatcmask``
+      disable TC-compat CMASK for MSAA surfaces
    ``nothreadllvm``
       disable LLVM threaded compilation
+   ``noumr``
+      disable UMR dumps during GPU hang detection (only with RADV_DEBUG=hang)
+   ``novrsflatshading``
+      disable VRS for flat shading (only on GFX10.3+)
    ``preoptir``
       dump LLVM IR before any optimizations
    ``shaders``
@@ -606,8 +621,13 @@ RADV driver environment variables
       initialize all memory allocated in VRAM as zero
 
 ``RADV_FORCE_FAMILY``
-   create a null device to compile shaders without a AMD GPU (e.g.
-   gfx900)
+   create a null device to compile shaders without a AMD GPU (e.g. vega10)
+
+``RADV_FORCE_VRS``
+   allow to force per-pipeline vertex VRS rates on GFX10.3+. This is only
+   forced for pipelines that don't explicitely use VRS or flat shading.
+   The supported values are 2x2, 1x2 and 2x1. Only for testing purposes.
+
 ``RADV_PERFTEST``
    a comma-separated list of named flags, which do various things:
 
@@ -617,14 +637,20 @@ RADV driver environment variables
       enable wave32 for compute shaders (GFX10+)
    ``dccmsaa``
       enable DCC for MSAA images
+   ``dccstores``
+      enable DCC for storage images (for performance testing on GFX10.3 only)
    ``dfsm``
-      enable dfsm
+      enable DFSM
    ``gewave32``
       enable wave32 for vertex/tess/geometry shaders (GFX10+)
    ``localbos``
       enable local BOs
+   ``nosam``
+      disable optimizations that get enabled when all VRAM is CPU visible.
    ``pswave32``
       enable wave32 for pixel shaders (GFX10+)
+   ``sam``
+      enable optimizations to move more driver internal objects to VRAM.
    ``tccompatcmask``
       enable TC-compat cmask for MSAA images
 
@@ -648,20 +674,16 @@ RADV driver environment variables
       disable various optimizations
    ``noscheduling``
       disable instructions scheduling
+   ``perfinfo``
+      print information used to calculate some pipeline statistics
+   ``liveinfo``
+      print liveness and register demand information before scheduling
 
 radeonsi driver environment variables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``AMD_DEBUG``
    a comma-separated list of named flags, which do various things:
-``nodma``
-   Disable SDMA
-``nodmaclear``
-   Disable SDMA clears
-``nodmacopyimage``
-   Disable SDMA image copies
-``zerovram``
-   Clear VRAM allocations.
 ``nodcc``
    Disable DCC.
 ``nodccclear``
@@ -680,8 +702,6 @@ radeonsi driver environment variables
    Disable MSAA compression
 ``nohyperz``
    Disable Hyper-Z
-``norbplus``
-   Disable RB+.
 ``no2d``
    Disable 2D tiling
 ``info``
@@ -732,8 +752,6 @@ radeonsi driver environment variables
    Use old-style monolithic shaders compiled on demand
 ``nooptvariant``
    Disable compiling optimized shader variants.
-``forcedma``
-   Use SDMA for all operations when possible.
 ``nowc``
    Disable GTT write combining
 ``check_vm``

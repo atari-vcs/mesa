@@ -82,7 +82,7 @@ _mesa_create_visual( GLboolean dbFlag,
                      GLint accumAlphaBits,
                      GLuint numSamples );
 
-extern GLboolean
+extern void
 _mesa_initialize_visual( struct gl_config *v,
                          GLboolean dbFlag,
                          GLboolean stereoFlag,
@@ -119,10 +119,6 @@ _mesa_initialize_context( struct gl_context *ctx,
 
 extern void
 _mesa_free_context_data(struct gl_context *ctx, bool destroy_debug_output);
-
-extern void
-_mesa_destroy_context( struct gl_context *ctx );
-
 
 extern void
 _mesa_copy_context(const struct gl_context *src, struct gl_context *dst, GLuint mask);
@@ -207,13 +203,14 @@ _mesa_inside_dlist_begin_end(const struct gl_context *ctx)
  * and calls dd_function_table::FlushVertices if so. Marks
  * __struct gl_contextRec::NewState with \p newstate.
  */
-#define FLUSH_VERTICES(ctx, newstate)				\
+#define FLUSH_VERTICES(ctx, newstate, pop_attrib_mask)          \
 do {								\
    if (MESA_VERBOSE & VERBOSE_STATE)				\
       _mesa_debug(ctx, "FLUSH_VERTICES in %s\n", __func__);	\
    if (ctx->Driver.NeedFlush & FLUSH_STORED_VERTICES)		\
       vbo_exec_FlushVertices(ctx, FLUSH_STORED_VERTICES);	\
    ctx->NewState |= newstate;					\
+   ctx->PopAttribState |= pop_attrib_mask;                      \
 } while (0)
 
 /**
@@ -356,7 +353,7 @@ static inline bool
 _mesa_has_half_float_textures(const struct gl_context *ctx)
 {
    return _mesa_has_ARB_texture_float(ctx) ||
-          _mesa_has_OES_texture_half_float(ctx) || _mesa_is_gles3(ctx);
+          _mesa_has_OES_texture_half_float(ctx);
 }
 
 static inline bool

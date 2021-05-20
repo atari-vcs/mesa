@@ -36,11 +36,17 @@
 #include <vulkan/vk_icd.h>
 #include <vk_enum_to_str.h>
 
+#include "vk_device.h"
+#include "vk_instance.h"
+#include "vk_physical_device.h"
+#include "vk_shader_module.h"
+#include "vk_util.h"
+
 #include <xf86drm.h>
 
 #ifdef HAVE_VALGRIND
-#include <valgrind/valgrind.h>
-#include <valgrind/memcheck.h>
+#include <valgrind.h>
+#include <memcheck.h>
 #define VG(x) x
 #else
 #define VG(x) ((void)0)
@@ -108,15 +114,6 @@ pack_emit_reloc(void *cl, const void *reloc) {}
       fprintf(stderr, __VA_ARGS__);                \
 } while (0)
 
-#define for_each_bit(b, dword)                                               \
-   for (uint32_t __dword = (dword);                                          \
-        (b) = __builtin_ffs(__dword) - 1, __dword; __dword &= ~(1 << (b)))
-
-#define typed_memcpy(dest, src, count) ({				\
-			STATIC_ASSERT(sizeof(*src) == sizeof(*dest)); \
-			memcpy((dest), (src), (count) * sizeof(*(src))); \
-		})
-
 struct v3dv_instance;
 
 #ifdef USE_V3D_SIMULATOR
@@ -128,20 +125,21 @@ struct v3dv_instance;
 struct v3d_simulator_file;
 
 struct v3dv_physical_device {
-   VK_LOADER_DATA _loader_data;
-
-   struct v3dv_instance *instance;
-
-   struct v3dv_device_extension_table supported_extensions;
-   struct v3dv_physical_device_dispatch_table dispatch;
+   struct vk_physical_device vk;
 
    char *name;
    int32_t render_fd;
    int32_t display_fd;
+   int32_t master_fd;
 
+   uint8_t driver_build_sha1[20];
    uint8_t pipeline_cache_uuid[VK_UUID_SIZE];
    uint8_t device_uuid[VK_UUID_SIZE];
    uint8_t driver_uuid[VK_UUID_SIZE];
+
+   struct disk_cache *disk_cache;
+
+   mtx_t mutex;
 
    struct wsi_device wsi_device;
 
@@ -159,6 +157,10 @@ struct v3dv_physical_device {
    } options;
 };
 
+VkResult v3dv_physical_device_acquire_display(struct v3dv_instance *instance,
+                                              struct v3dv_physical_device *pdevice,
+                                              VkIcdSurfaceBase *surface);
+
 VkResult v3dv_wsi_init(struct v3dv_physical_device *physical_device);
 void v3dv_wsi_finish(struct v3dv_physical_device *physical_device);
 
@@ -168,29 +170,14 @@ void v3dv_meta_clear_finish(struct v3dv_device *device);
 void v3dv_meta_blit_init(struct v3dv_device *device);
 void v3dv_meta_blit_finish(struct v3dv_device *device);
 
-struct v3dv_app_info {
-   const char *app_name;
-   uint32_t app_version;
-   const char *engine_name;
-   uint32_t engine_version;
-   uint32_t api_version;
-};
+void v3dv_meta_texel_buffer_copy_init(struct v3dv_device *device);
+void v3dv_meta_texel_buffer_copy_finish(struct v3dv_device *device);
 
 struct v3dv_instance {
-   VK_LOADER_DATA _loader_data;
-
-   VkAllocationCallbacks alloc;
-
-   struct v3dv_app_info app_info;
-
-   struct v3dv_instance_extension_table enabled_extensions;
-   struct v3dv_instance_dispatch_table dispatch;
-   struct v3dv_device_dispatch_table device_dispatch;
+   struct vk_instance vk;
 
    int physicalDeviceCount;
    struct v3dv_physical_device physicalDevice;
-
-   struct vk_debug_report_instance debug_report_callbacks;
 
    bool pipeline_cache_enabled;
    bool default_pipeline_cache_enabled;
@@ -198,6 +185,7 @@ struct v3dv_instance {
 
 /* Tracks wait threads spawned from a single vkQueueSubmit call */
 struct v3dv_queue_submit_wait_info {
+   /*  struct vk_object_base base; ?*/
    struct list_head list_link;
 
    struct v3dv_device *device;
@@ -226,7 +214,7 @@ struct v3dv_queue_submit_wait_info {
 };
 
 struct v3dv_queue {
-   VK_LOADER_DATA _loader_data;
+   struct vk_object_base base;
 
    struct v3dv_device *device;
    VkDeviceQueueCreateFlags flags;
@@ -240,7 +228,9 @@ struct v3dv_queue {
    struct v3dv_job *noop_job;
 };
 
-#define V3DV_META_BLIT_CACHE_KEY_SIZE (4 * sizeof(uint32_t))
+#define V3DV_META_BLIT_CACHE_KEY_SIZE              (4 * sizeof(uint32_t))
+#define V3DV_META_TEXEL_BUFFER_COPY_CACHE_KEY_SIZE (2 * sizeof(uint32_t) + \
+                                                    sizeof(VkComponentMapping))
 
 struct v3dv_meta_color_clear_pipeline {
    VkPipeline pipeline;
@@ -261,14 +251,83 @@ struct v3dv_meta_blit_pipeline {
    uint8_t key[V3DV_META_BLIT_CACHE_KEY_SIZE];
 };
 
+struct v3dv_meta_texel_buffer_copy_pipeline {
+   VkPipeline pipeline;
+   VkRenderPass pass;
+   VkRenderPass pass_no_load;
+   uint8_t key[V3DV_META_TEXEL_BUFFER_COPY_CACHE_KEY_SIZE];
+};
+
+struct v3dv_pipeline_key {
+   bool robust_buffer_access;
+   uint8_t topology;
+   uint8_t logicop_func;
+   bool msaa;
+   bool sample_coverage;
+   bool sample_alpha_to_coverage;
+   bool sample_alpha_to_one;
+   uint8_t cbufs;
+   struct {
+      enum pipe_format format;
+      const uint8_t *swizzle;
+   } color_fmt[V3D_MAX_DRAW_BUFFERS];
+   uint8_t f32_color_rb;
+   uint32_t va_swap_rb_mask;
+};
+
 struct v3dv_pipeline_cache_stats {
    uint32_t miss;
    uint32_t hit;
    uint32_t count;
 };
 
+/* Equivalent to gl_shader_stage, but including the coordinate shaders
+ *
+ * FIXME: perhaps move to common
+ */
+typedef enum {
+   BROADCOM_SHADER_VERTEX,
+   BROADCOM_SHADER_VERTEX_BIN,
+   BROADCOM_SHADER_FRAGMENT,
+   BROADCOM_SHADER_COMPUTE,
+} broadcom_shader_stage;
+
+#define BROADCOM_SHADER_STAGES (BROADCOM_SHADER_COMPUTE + 1)
+
+/* Assumes that coordinate shaders will be custom-handled by the caller */
+static inline broadcom_shader_stage
+gl_shader_stage_to_broadcom(gl_shader_stage stage)
+{
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+      return BROADCOM_SHADER_VERTEX;
+   case MESA_SHADER_FRAGMENT:
+      return BROADCOM_SHADER_FRAGMENT;
+   case MESA_SHADER_COMPUTE:
+      return BROADCOM_SHADER_COMPUTE;
+   default:
+      unreachable("Unknown gl shader stage");
+   }
+}
+
+static inline gl_shader_stage
+broadcom_shader_stage_to_gl(broadcom_shader_stage stage)
+{
+   switch (stage) {
+   case BROADCOM_SHADER_VERTEX:
+   case BROADCOM_SHADER_VERTEX_BIN:
+      return MESA_SHADER_VERTEX;
+   case BROADCOM_SHADER_FRAGMENT:
+      return MESA_SHADER_FRAGMENT;
+   case BROADCOM_SHADER_COMPUTE:
+      return MESA_SHADER_COMPUTE;
+   default:
+      unreachable("Unknown broadcom shader stage");
+   }
+}
+
 struct v3dv_pipeline_cache {
-   VK_LOADER_DATA _loader_data;
+   struct vk_object_base base;
 
    struct v3dv_device *device;
    mtx_t mutex;
@@ -276,22 +335,16 @@ struct v3dv_pipeline_cache {
    struct hash_table *nir_cache;
    struct v3dv_pipeline_cache_stats nir_stats;
 
-   struct hash_table *variant_cache;
-   struct v3dv_pipeline_cache_stats variant_stats;
+   struct hash_table *cache;
+   struct v3dv_pipeline_cache_stats stats;
 };
 
 struct v3dv_device {
-   VK_LOADER_DATA _loader_data;
-
-   VkAllocationCallbacks alloc;
+   struct vk_device vk;
 
    struct v3dv_instance *instance;
+   struct v3dv_physical_device *pdevice;
 
-   struct v3dv_device_extension_table enabled_extensions;
-   struct v3dv_device_dispatch_table dispatch;
-
-   int32_t render_fd;
-   int32_t display_fd;
    struct v3d_device_info devinfo;
    struct v3dv_queue queue;
 
@@ -305,18 +358,23 @@ struct v3dv_device {
    struct {
       mtx_t mtx;
       struct {
-         VkPipelineLayout playout;
+         VkPipelineLayout p_layout;
          struct hash_table *cache; /* v3dv_meta_color_clear_pipeline */
       } color_clear;
       struct {
-         VkPipelineLayout playout;
+         VkPipelineLayout p_layout;
          struct hash_table *cache; /* v3dv_meta_depth_clear_pipeline */
       } depth_clear;
       struct {
-         VkDescriptorSetLayout dslayout;
-         VkPipelineLayout playout;
+         VkDescriptorSetLayout ds_layout;
+         VkPipelineLayout p_layout;
          struct hash_table *cache[3]; /* v3dv_meta_blit_pipeline for 1d, 2d, 3d */
       } blit;
+      struct {
+         VkDescriptorSetLayout ds_layout;
+         VkPipelineLayout p_layout;
+         struct hash_table *cache[3]; /* v3dv_meta_texel_buffer_copy_pipeline for 1d, 2d, 3d */
+      } texel_buffer_copy;
    } meta;
 
    struct v3dv_bo_cache {
@@ -338,10 +396,19 @@ struct v3dv_device {
 
    struct v3dv_pipeline_cache default_pipeline_cache;
 
+   /* GL_SHADER_STATE_RECORD needs to speficy default attribute values. The
+    * following covers the most common case, that is all attributes format
+    * being float being float, allowing us to reuse the same BO for all
+    * pipelines matching this requirement. Pipelines that need integer
+    * attributes will create their own BO.
+    */
+   struct v3dv_bo *default_attribute_float;
    VkPhysicalDeviceFeatures features;
 };
 
 struct v3dv_device_memory {
+   struct vk_object_base base;
+
    struct v3dv_bo *bo;
    const VkMemoryType *type;
    bool has_bo_ownership;
@@ -417,6 +484,8 @@ struct v3d_resource_slice {
 };
 
 struct v3dv_image {
+   struct vk_object_base base;
+
    VkImageType type;
    VkImageAspectFlags aspects;
 
@@ -448,6 +517,8 @@ struct v3dv_image {
 VkImageViewType v3dv_image_type_to_view_type(VkImageType type);
 
 struct v3dv_image_view {
+   struct vk_object_base base;
+
    const struct v3dv_image *image;
    VkImageAspectFlags aspects;
    VkExtent3D extent;
@@ -487,6 +558,8 @@ struct v3dv_image_view {
 uint32_t v3dv_layer_offset(const struct v3dv_image *image, uint32_t level, uint32_t layer);
 
 struct v3dv_buffer {
+   struct vk_object_base base;
+
    VkDeviceSize size;
    VkBufferUsageFlags usage;
    uint32_t alignment;
@@ -496,6 +569,8 @@ struct v3dv_buffer {
 };
 
 struct v3dv_buffer_view {
+   struct vk_object_base base;
+
    const struct v3dv_buffer *buffer;
 
    VkFormat vk_format;
@@ -547,6 +622,8 @@ struct v3dv_render_pass_attachment {
 };
 
 struct v3dv_render_pass {
+   struct vk_object_base base;
+
    uint32_t attachment_count;
    struct v3dv_render_pass_attachment *attachments;
 
@@ -557,6 +634,8 @@ struct v3dv_render_pass {
 };
 
 struct v3dv_framebuffer {
+   struct vk_object_base base;
+
    uint32_t width;
    uint32_t height;
    uint32_t layers;
@@ -603,6 +682,8 @@ bool v3dv_subpass_area_is_tile_aligned(const VkRect2D *area,
                                        struct v3dv_render_pass *pass,
                                        uint32_t subpass_idx);
 struct v3dv_cmd_pool {
+   struct vk_object_base base;
+
    VkAllocationCallbacks alloc;
    struct list_head cmd_buffers;
 };
@@ -671,15 +752,16 @@ enum v3dv_cmd_dirty_bits {
    V3DV_CMD_DIRTY_STENCIL_WRITE_MASK        = 1 << 3,
    V3DV_CMD_DIRTY_STENCIL_REFERENCE         = 1 << 4,
    V3DV_CMD_DIRTY_PIPELINE                  = 1 << 5,
-   V3DV_CMD_DIRTY_VERTEX_BUFFER             = 1 << 6,
-   V3DV_CMD_DIRTY_INDEX_BUFFER              = 1 << 7,
-   V3DV_CMD_DIRTY_DESCRIPTOR_SETS           = 1 << 8,
-   V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS   = 1 << 9,
-   V3DV_CMD_DIRTY_PUSH_CONSTANTS            = 1 << 10,
-   V3DV_CMD_DIRTY_BLEND_CONSTANTS           = 1 << 11,
-   V3DV_CMD_DIRTY_OCCLUSION_QUERY           = 1 << 12,
-   V3DV_CMD_DIRTY_DEPTH_BIAS                = 1 << 13,
-   V3DV_CMD_DIRTY_LINE_WIDTH                = 1 << 14,
+   V3DV_CMD_DIRTY_COMPUTE_PIPELINE          = 1 << 6,
+   V3DV_CMD_DIRTY_VERTEX_BUFFER             = 1 << 7,
+   V3DV_CMD_DIRTY_INDEX_BUFFER              = 1 << 8,
+   V3DV_CMD_DIRTY_DESCRIPTOR_SETS           = 1 << 9,
+   V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS   = 1 << 10,
+   V3DV_CMD_DIRTY_PUSH_CONSTANTS            = 1 << 11,
+   V3DV_CMD_DIRTY_BLEND_CONSTANTS           = 1 << 12,
+   V3DV_CMD_DIRTY_OCCLUSION_QUERY           = 1 << 13,
+   V3DV_CMD_DIRTY_DEPTH_BIAS                = 1 << 14,
+   V3DV_CMD_DIRTY_LINE_WIDTH                = 1 << 15,
 };
 
 struct v3dv_dynamic_state {
@@ -712,6 +794,7 @@ struct v3dv_dynamic_state {
 
    struct {
       float constant_factor;
+      float depth_bias_clamp;
       float slope_factor;
    } depth_bias;
 
@@ -862,6 +945,14 @@ struct v3dv_job {
    enum v3dv_ez_state ez_state;
    enum v3dv_ez_state first_ez_state;
 
+   /* If we have already decided if we need to disable Early Z/S completely
+    * for this job.
+    */
+   bool decided_global_ez_enable;
+
+   /* If this job has been configured to use early Z/S clear */
+   bool early_zs_clear;
+
    /* Number of draw calls recorded into the job */
    uint32_t draw_count;
 
@@ -932,6 +1023,12 @@ struct v3dv_descriptor_state {
    uint32_t dynamic_offsets[MAX_DYNAMIC_BUFFERS];
 };
 
+struct v3dv_cmd_pipeline_state {
+   struct v3dv_pipeline *pipeline;
+
+   struct v3dv_descriptor_state descriptor_state;
+};
+
 struct v3dv_cmd_buffer_state {
    struct v3dv_render_pass *pass;
    struct v3dv_framebuffer *framebuffer;
@@ -942,8 +1039,8 @@ struct v3dv_cmd_buffer_state {
 
    uint32_t subpass_idx;
 
-   struct v3dv_pipeline *pipeline;
-   struct v3dv_descriptor_state descriptor_state[2];
+   struct v3dv_cmd_pipeline_state gfx;
+   struct v3dv_cmd_pipeline_state compute;
 
    struct v3dv_dynamic_state dynamic;
    uint32_t dirty;
@@ -974,6 +1071,13 @@ struct v3dv_cmd_buffer_state {
       uint8_t index_size;
    } index_buffer;
 
+   /* Current uniforms */
+   struct {
+      struct v3dv_cl_reloc vs_bin;
+      struct v3dv_cl_reloc vs;
+      struct v3dv_cl_reloc fs;
+   } uniforms;
+
    /* Used to flag OOM conditions during command buffer recording */
    bool oom;
 
@@ -992,7 +1096,6 @@ struct v3dv_cmd_buffer_state {
    struct {
       uint32_t subpass_idx;
       VkRenderPass pass;
-      VkPipeline pipeline;
       VkFramebuffer framebuffer;
 
       uint32_t attachment_alloc_count;
@@ -1004,7 +1107,7 @@ struct v3dv_cmd_buffer_state {
 
       struct v3dv_dynamic_state dynamic;
 
-      struct v3dv_descriptor_state descriptor_state;
+      struct v3dv_cmd_pipeline_state gfx;
       bool has_descriptor_state;
 
       uint32_t push_constants[MAX_PUSH_CONSTANTS_SIZE / 4];
@@ -1084,16 +1187,6 @@ struct v3dv_combined_image_sampler_descriptor {
    uint8_t sampler_state[cl_aligned_packet_length(SAMPLER_STATE, 32)];
 };
 
-/* Aux struct as it is really common to have a pair bo/address. Called
- * resource because it is really likely that we would need something like that
- * if we work on reuse the same bo at different points (like the shader
- * assembly).
- */
-struct v3dv_resource {
-   struct v3dv_bo *bo;
-   uint32_t offset;
-};
-
 struct v3dv_query {
    bool maybe_available;
    union {
@@ -1103,6 +1196,8 @@ struct v3dv_query {
 };
 
 struct v3dv_query_pool {
+   struct vk_object_base base;
+
    VkQueryType query_type;
    uint32_t query_count;
    struct v3dv_query *queries;
@@ -1126,7 +1221,7 @@ struct v3dv_cmd_buffer_private_obj {
 };
 
 struct v3dv_cmd_buffer {
-   VK_LOADER_DATA _loader_data;
+   struct vk_object_base base;
 
    struct v3dv_device *device;
 
@@ -1146,8 +1241,13 @@ struct v3dv_cmd_buffer {
 
    struct v3dv_cmd_buffer_state state;
 
+   /* FIXME: we have just one client-side and bo for the push constants,
+    * independently of the stageFlags in vkCmdPushConstants, and the
+    * pipelineBindPoint in vkCmdBindPipeline. We could probably do more stage
+    * tunning in the future if it makes sense.
+    */
    uint32_t push_constants_data[MAX_PUSH_CONSTANTS_SIZE / 4];
-   struct v3dv_resource push_constants_resource;
+   struct v3dv_cl_reloc push_constants_resource;
 
    /* Collection of Vulkan objects created internally by the driver (typically
     * during recording of meta operations) that are part of the command buffer
@@ -1161,6 +1261,10 @@ struct v3dv_cmd_buffer {
          /* The current descriptor pool for blit sources */
          VkDescriptorPool dspool;
       } blit;
+      struct {
+         /* The current descriptor pool for texel buffer copy sources */
+         VkDescriptorPool dspool;
+      } texel_buffer_copy;
    } meta;
 
    /* List of jobs in the command buffer. For primary command buffers it
@@ -1229,6 +1333,8 @@ void v3dv_cmd_buffer_add_private_obj(struct v3dv_cmd_buffer *cmd_buffer,
                                      v3dv_cmd_buffer_private_obj_destroy_cb destroy_cb);
 
 struct v3dv_semaphore {
+   struct vk_object_base base;
+
    /* A syncobject handle associated with this semaphore */
    uint32_t sync;
 
@@ -1237,6 +1343,8 @@ struct v3dv_semaphore {
 };
 
 struct v3dv_fence {
+   struct vk_object_base base;
+
    /* A syncobject handle associated with this fence */
    uint32_t sync;
 
@@ -1245,51 +1353,12 @@ struct v3dv_fence {
 };
 
 struct v3dv_event {
+   struct vk_object_base base;
    int state;
 };
 
-struct v3dv_shader_module {
-   /* A NIR shader. We create NIR modules for shaders that are generated
-    * internally by the driver.
-    */
-   struct nir_shader *nir;
-
-   /* A SPIR-V shader */
-   unsigned char sha1[20];
-   uint32_t size;
-   char data[0];
-};
-
-/* FIXME: the same function at anv, radv and tu, perhaps create common
- * place?
- */
-static inline gl_shader_stage
-vk_to_mesa_shader_stage(VkShaderStageFlagBits vk_stage)
-{
-   assert(__builtin_popcount(vk_stage) == 1);
-   return ffs(vk_stage) - 1;
-}
-
 struct v3dv_shader_variant {
-   uint32_t ref_cnt;
-
-   gl_shader_stage stage;
-   bool is_coord;
-
-   /* v3d_key used to compile the variant. Sometimes we can just skip the
-    * pipeline caches, and look using this.
-    */
-   union {
-      struct v3d_key base;
-      struct v3d_vs_key vs;
-      struct v3d_fs_key fs;
-   } key;
-   uint32_t v3d_key_size;
-
-   /* key for the pipeline cache, it is p_stage shader_sha1 + v3d compiler
-    * sha1
-    */
-   unsigned char variant_sha1[20];
+   broadcom_shader_stage stage;
 
    union {
       struct v3d_prog_data *base;
@@ -1302,11 +1371,17 @@ struct v3dv_shader_variant {
     * serialize
     */
    uint32_t prog_data_size;
-   /* FIXME: using one bo per shader. Eventually we would be interested on
-    * reusing the same bo for all the shaders, like a bo per v3dv_pipeline for
-    * shaders.
+
+   /* The assembly for this variant will be uploaded to a BO shared with all
+    * other shader stages in that pipeline. This is the offset in that BO.
     */
-   struct v3dv_bo *assembly_bo;
+   uint32_t assembly_offset;
+
+   /* Note: it is really likely that qpu_insts would be NULL, as it will be
+    * used only temporarily, to upload it to the shared bo, as we compile the
+    * different stages individually.
+    */
+   uint64_t *qpu_insts;
    uint32_t qpu_insts_size;
 };
 
@@ -1322,13 +1397,9 @@ struct v3dv_shader_variant {
 struct v3dv_pipeline_stage {
    struct v3dv_pipeline *pipeline;
 
-   gl_shader_stage stage;
-   /* FIXME: is_coord only make sense if stage == MESA_SHADER_VERTEX. Perhaps
-    * a stage base/vs/fs as keys and prog_data?
-    */
-   bool is_coord;
+   broadcom_shader_stage stage;
 
-   const struct v3dv_shader_module *module;
+   const struct vk_shader_module *module;
    const char *entrypoint;
    const VkSpecializationInfo *spec_info;
 
@@ -1339,26 +1410,6 @@ struct v3dv_pipeline_stage {
 
    /** A name for this program, so you can track it in shader-db output. */
    uint32_t program_id;
-   /** How many variants of this program were compiled, for shader-db. */
-   uint32_t compiled_variant_count;
-
-   /* The following are the default v3d_key populated using
-    * VkCreateGraphicsPipelineCreateInfo. Variants will be created tweaking
-    * them, so we don't need to maintain a copy of that create info struct
-    * around
-    */
-   union {
-      struct v3d_key base;
-      struct v3d_vs_key vs;
-      struct v3d_fs_key fs;
-   } key;
-
-   struct v3dv_shader_variant*current_variant;
-
-   /* FIXME: only make sense on vs, so perhaps a v3dv key like radv? or a kind
-    * of pipe_draw_info
-    */
-   enum pipe_prim_type topology;
 };
 
 /* FIXME: although the full vpm_config is not required at this point, as we
@@ -1394,6 +1445,13 @@ struct v3dv_descriptor_pool_entry
 };
 
 struct v3dv_descriptor_pool {
+   struct vk_object_base base;
+
+   /* If this descriptor pool has been allocated for the driver for internal
+    * use, typically to implement meta operations.
+    */
+   bool is_driver_internal;
+
    struct v3dv_bo *bo;
    /* Current offset at the descriptor bo. 0 means that we didn't use it for
     * any descriptor. If the descriptor bo is NULL, current offset is
@@ -1416,6 +1474,8 @@ struct v3dv_descriptor_pool {
 };
 
 struct v3dv_descriptor_set {
+   struct vk_object_base base;
+
    struct v3dv_descriptor_pool *pool;
 
    const struct v3dv_descriptor_set_layout *layout;
@@ -1452,6 +1512,8 @@ struct v3dv_descriptor_set_binding_layout {
 };
 
 struct v3dv_descriptor_set_layout {
+   struct vk_object_base base;
+
    VkDescriptorSetLayoutCreateFlags flags;
 
    /* Number of bindings in this descriptor set */
@@ -1475,32 +1537,51 @@ struct v3dv_descriptor_set_layout {
 };
 
 struct v3dv_pipeline_layout {
+   struct vk_object_base base;
+
    struct {
       struct v3dv_descriptor_set_layout *layout;
       uint32_t dynamic_offset_start;
    } set[MAX_SETS];
 
    uint32_t num_sets;
-   uint32_t dynamic_offset_count;
 
+   /* Shader stages that are declared to use descriptors from this layout */
+   uint32_t shader_stages;
+
+   uint32_t dynamic_offset_count;
    uint32_t push_constant_size;
 };
+
+/*
+ * We are using descriptor maps for ubo/ssbo and texture/samplers, so we need
+ * it to be big enough to include the max value for all of them.
+ *
+ * FIXME: one alternative would be to allocate the map as big as you need for
+ * each descriptor type. That would means more individual allocations.
+ */
+#define DESCRIPTOR_MAP_SIZE MAX3(V3D_MAX_TEXTURE_SAMPLERS, \
+                                 MAX_UNIFORM_BUFFERS,      \
+                                 MAX_STORAGE_BUFFERS)
+
 
 struct v3dv_descriptor_map {
    /* TODO: avoid fixed size array/justify the size */
    unsigned num_desc; /* Number of descriptors  */
-   int set[64];
-   int binding[64];
-   int array_index[64];
-   int array_size[64];
+   int set[DESCRIPTOR_MAP_SIZE];
+   int binding[DESCRIPTOR_MAP_SIZE];
+   int array_index[DESCRIPTOR_MAP_SIZE];
+   int array_size[DESCRIPTOR_MAP_SIZE];
 
-   /* The following makes sense for textures, but this is the easier place to
-    * put it
+   /* NOTE: the following is only for sampler, but this is the easier place to
+    * put it.
     */
-   bool is_shadow[64];
+   uint8_t return_size[DESCRIPTOR_MAP_SIZE];
 };
 
 struct v3dv_sampler {
+   struct vk_object_base base;
+
    bool compare_enable;
    bool unnormalized_coordinates;
    bool clamp_to_transparent_black_border;
@@ -1512,7 +1593,19 @@ struct v3dv_sampler {
    uint8_t sampler_state[cl_packet_length(SAMPLER_STATE)];
 };
 
-#define V3DV_NO_SAMPLER_IDX 666
+/* We keep two special values for the sampler idx that represents exactly when a
+ * sampler is not needed/provided. The main use is that even if we don't have
+ * sampler, we still need to do the output unpacking (through
+ * nir_lower_tex). The easier way to do this is to add those special "no
+ * sampler" in the sampler_map, and then use the proper unpacking for that
+ * case.
+ *
+ * We have one when we want a 16bit output size, and other when we want a
+ * 32bit output size. We use the info coming from the RelaxedPrecision
+ * decoration to decide between one and the other.
+ */
+#define V3DV_NO_SAMPLER_16BIT_IDX 0
+#define V3DV_NO_SAMPLER_32BIT_IDX 1
 
 /*
  * Following two methods are using on the combined to/from texture/sampler
@@ -1540,7 +1633,28 @@ v3dv_pipeline_combined_index_key_unpack(uint32_t combined_index_key,
       *sampler_index = sampler;
 }
 
+/* The structure represents data shared between different objects, like the
+ * pipeline and the pipeline cache, so we ref count it to know when it should
+ * be freed.
+ */
+struct v3dv_pipeline_shared_data {
+   uint32_t ref_cnt;
+
+   unsigned char sha1_key[20];
+
+   struct v3dv_descriptor_map ubo_map;
+   struct v3dv_descriptor_map ssbo_map;
+   struct v3dv_descriptor_map sampler_map;
+   struct v3dv_descriptor_map texture_map;
+
+   struct v3dv_shader_variant *variants[BROADCOM_SHADER_STAGES];
+
+   struct v3dv_bo *assembly_bo;
+};
+
 struct v3dv_pipeline {
+   struct vk_object_base base;
+
    struct v3dv_device *device;
 
    VkShaderStageFlags active_stages;
@@ -1565,6 +1679,9 @@ struct v3dv_pipeline {
    struct v3dv_dynamic_state dynamic_state;
 
    struct v3dv_pipeline_layout *layout;
+
+   /* Whether this pipeline enables depth writes */
+   bool z_updates_enable;
 
    enum v3dv_ez_state ez_state;
 
@@ -1595,29 +1712,16 @@ struct v3dv_pipeline {
    } va[MAX_VERTEX_ATTRIBS];
    uint32_t va_count;
 
-   struct v3dv_descriptor_map ubo_map;
-   struct v3dv_descriptor_map ssbo_map;
+   enum pipe_prim_type topology;
 
-   struct v3dv_descriptor_map sampler_map;
-   struct v3dv_descriptor_map texture_map;
+   struct v3dv_pipeline_shared_data *shared_data;
 
-   /*
-    * Vulkan has separate texture and sampler objects. Previous sampler and
-    * texture map uses a sampler and texture index respectively, that can be
-    * different. But OpenGL combine both (or in other words, they are the
-    * same). The v3d compiler and all the nir lowerings that they use were
-    * written under that assumption. In order to not update all those, we
-    * combine the indexes, and we use the following maps to get one or the
-    * other. In general the driver side uses the tex/sampler indexes to gather
-    * resources, and the compiler side uses the combined index (so the v3d key
-    * texture info will be indexed using the combined index).
-    */
-   struct hash_table *combined_index_map;
-   uint32_t combined_index_to_key_map[32];
-   uint32_t next_combined_index;
-
-   /* FIXME: this bo is another candidate to data to be uploaded using a
-    * resource manager, instead of a individual bo
+   /* In general we can reuse v3dv_device->default_attribute_float, so note
+    * that the following can be NULL.
+    *
+    * FIXME: the content of this BO will be small, so it could be improved to
+    * be uploaded to a common BO. But as in most cases it will be NULL, it is
+    * not a priority.
     */
    struct v3dv_bo *default_attribute_values;
 
@@ -1626,9 +1730,6 @@ struct v3dv_pipeline {
 
    /* If the pipeline should emit any of the stencil configuration packets */
    bool emit_stencil_cfg[2];
-
-   /* If the pipeline is using push constants */
-   bool use_push_constants;
 
    /* Blend state */
    struct {
@@ -1667,6 +1768,16 @@ v3dv_pipeline_get_binding_point(struct v3dv_pipeline *pipeline)
           !(pipeline->active_stages & VK_SHADER_STAGE_COMPUTE_BIT));
    return pipeline->active_stages == VK_SHADER_STAGE_COMPUTE_BIT ?
       VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
+}
+
+static inline struct v3dv_descriptor_state*
+v3dv_cmd_buffer_get_descriptor_state(struct v3dv_cmd_buffer *cmd_buffer,
+                                     struct v3dv_pipeline *pipeline)
+{
+   if (v3dv_pipeline_get_binding_point(pipeline) == VK_PIPELINE_BIND_POINT_COMPUTE)
+      return &cmd_buffer->state.compute.descriptor_state;
+   else
+      return &cmd_buffer->state.gfx.descriptor_state;
 }
 
 const nir_shader_compiler_options *v3dv_pipeline_get_nir_options(void);
@@ -1740,28 +1851,6 @@ uint32_t v3dv_physical_device_api_version(struct v3dv_physical_device *dev);
 uint32_t v3dv_physical_device_vendor_id(struct v3dv_physical_device *dev);
 uint32_t v3dv_physical_device_device_id(struct v3dv_physical_device *dev);
 
-int v3dv_get_instance_entrypoint_index(const char *name);
-int v3dv_get_device_entrypoint_index(const char *name);
-int v3dv_get_physical_device_entrypoint_index(const char *name);
-
-const char *v3dv_get_instance_entry_name(int index);
-const char *v3dv_get_physical_device_entry_name(int index);
-const char *v3dv_get_device_entry_name(int index);
-
-bool
-v3dv_instance_entrypoint_is_enabled(int index, uint32_t core_version,
-                                    const struct v3dv_instance_extension_table *instance);
-bool
-v3dv_physical_device_entrypoint_is_enabled(int index, uint32_t core_version,
-                                           const struct v3dv_instance_extension_table *instance);
-bool
-v3dv_device_entrypoint_is_enabled(int index, uint32_t core_version,
-                                  const struct v3dv_instance_extension_table *instance,
-                                  const struct v3dv_device_extension_table *device);
-
-void *v3dv_lookup_entrypoint(const struct v3d_device_info *devinfo,
-                             const char *name);
-
 VkResult __vk_errorf(struct v3dv_instance *instance, VkResult error,
                      const char *file, int line,
                      const char *format, ...);
@@ -1782,6 +1871,11 @@ void v3dv_get_internal_type_bpp_for_output_format(uint32_t format, uint32_t *typ
 uint8_t v3dv_get_tex_return_size(const struct v3dv_format *vf, bool compare_enable);
 bool v3dv_tfu_supports_tex_format(const struct v3d_device_info *devinfo,
                                   uint32_t tex_format);
+const struct v3dv_format *
+v3dv_get_compatible_tfu_format(const struct v3d_device_info *devinfo,
+                               uint32_t bpp, VkFormat *out_vk_format);
+bool v3dv_buffer_format_supports_features(VkFormat vk_format,
+                                          VkFormatFeatureFlags features);
 bool v3dv_format_supports_tlb_resolve(const struct v3dv_format *format);
 
 uint32_t v3d_utile_width(int cpp);
@@ -1800,14 +1894,13 @@ void v3d_store_tiled_image(void *dst, uint32_t dst_stride,
                            const struct pipe_box *box);
 
 struct v3dv_cl_reloc v3dv_write_uniforms(struct v3dv_cmd_buffer *cmd_buffer,
-                                         struct v3dv_pipeline_stage *p_stage);
-struct v3dv_cl_reloc v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
-                                                    struct v3dv_pipeline_stage *p_stage,
-                                                    uint32_t **wg_count_offsets);
+                                         struct v3dv_pipeline *pipeline,
+                                         struct v3dv_shader_variant *variant);
 
-void v3d_key_update_return_size(struct v3dv_pipeline *pipeline,
-                                struct v3d_key *key,
-                                uint32_t return_size);
+struct v3dv_cl_reloc v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
+                                                    struct v3dv_pipeline *pipeline,
+                                                    struct v3dv_shader_variant *variant,
+                                                    uint32_t **wg_count_offsets);
 
 struct v3dv_shader_variant *
 v3dv_get_shader_variant(struct v3dv_pipeline_stage *p_stage,
@@ -1819,14 +1912,11 @@ v3dv_get_shader_variant(struct v3dv_pipeline_stage *p_stage,
 
 struct v3dv_shader_variant *
 v3dv_shader_variant_create(struct v3dv_device *device,
-                           gl_shader_stage stage,
-                           bool is_coord,
-                           const unsigned char *variant_sha1,
-                           const struct v3d_key *key,
-                           uint32_t key_size,
+                           broadcom_shader_stage stage,
                            struct v3d_prog_data *prog_data,
                            uint32_t prog_data_size,
-                           const uint64_t *qpu_insts,
+                           uint32_t assembly_offset,
+                           uint64_t *qpu_insts,
                            uint32_t qpu_insts_size,
                            VkResult *out_vk_result);
 
@@ -1835,19 +1925,23 @@ v3dv_shader_variant_destroy(struct v3dv_device *device,
                             struct v3dv_shader_variant *variant);
 
 static inline void
-v3dv_shader_variant_ref(struct v3dv_shader_variant *variant)
+v3dv_pipeline_shared_data_ref(struct v3dv_pipeline_shared_data *shared_data)
 {
-   assert(variant && variant->ref_cnt >= 1);
-   p_atomic_inc(&variant->ref_cnt);
+   assert(shared_data && shared_data->ref_cnt >= 1);
+   p_atomic_inc(&shared_data->ref_cnt);
 }
 
+void
+v3dv_pipeline_shared_data_destroy(struct v3dv_device *device,
+                                  struct v3dv_pipeline_shared_data *shared_data);
+
 static inline void
-v3dv_shader_variant_unref(struct v3dv_device *device,
-                          struct v3dv_shader_variant *variant)
+v3dv_pipeline_shared_data_unref(struct v3dv_device *device,
+                                struct v3dv_pipeline_shared_data *shared_data)
 {
-   assert(variant && variant->ref_cnt >= 1);
-   if (p_atomic_dec_zero(&variant->ref_cnt))
-      v3dv_shader_variant_destroy(device, variant);
+   assert(shared_data && shared_data->ref_cnt >= 1);
+   if (p_atomic_dec_zero(&shared_data->ref_cnt))
+      v3dv_pipeline_shared_data_destroy(device, shared_data);
 }
 
 struct v3dv_descriptor *
@@ -1912,17 +2006,20 @@ nir_shader* v3dv_pipeline_cache_search_for_nir(struct v3dv_pipeline *pipeline,
                                                const nir_shader_compiler_options *nir_options,
                                                unsigned char sha1_key[20]);
 
-struct v3dv_shader_variant*
-v3dv_pipeline_cache_search_for_variant(struct v3dv_pipeline *pipeline,
-                                       struct v3dv_pipeline_cache *cache,
-                                       unsigned char sha1_key[20]);
+struct v3dv_pipeline_shared_data *
+v3dv_pipeline_cache_search_for_pipeline(struct v3dv_pipeline_cache *cache,
+                                        unsigned char sha1_key[20]);
 
 void
-v3dv_pipeline_cache_upload_variant(struct v3dv_pipeline *pipeline,
-                                   struct v3dv_pipeline_cache *cache,
-                                   struct v3dv_shader_variant  *variant);
+v3dv_pipeline_cache_upload_pipeline(struct v3dv_pipeline *pipeline,
+                                    struct v3dv_pipeline_cache *cache);
 
-void v3dv_shader_module_internal_init(struct v3dv_shader_module *module,
+struct v3dv_bo *
+v3dv_pipeline_create_default_attribute_values(struct v3dv_device *device,
+                                              struct v3dv_pipeline *pipeline);
+
+void v3dv_shader_module_internal_init(struct v3dv_device *device,
+                                      struct vk_shader_module *module,
                                       nir_shader *nir);
 
 #define V3DV_DEFINE_HANDLE_CASTS(__v3dv_type, __VkType)   \
@@ -1981,7 +2078,6 @@ V3DV_DEFINE_NONDISP_HANDLE_CASTS(v3dv_query_pool, VkQueryPool)
 V3DV_DEFINE_NONDISP_HANDLE_CASTS(v3dv_render_pass, VkRenderPass)
 V3DV_DEFINE_NONDISP_HANDLE_CASTS(v3dv_sampler, VkSampler)
 V3DV_DEFINE_NONDISP_HANDLE_CASTS(v3dv_semaphore, VkSemaphore)
-V3DV_DEFINE_NONDISP_HANDLE_CASTS(v3dv_shader_module, VkShaderModule)
 
 /* This is defined as a macro so that it works for both
  * VkImageSubresourceRange and VkImageSubresourceLayers

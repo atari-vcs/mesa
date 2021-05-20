@@ -36,6 +36,7 @@
 #include "buffers.h"
 #include "context.h"
 #include "debug_output.h"
+#include "draw_validate.h"
 #include "enums.h"
 #include "fbobject.h"
 #include "formats.h"
@@ -60,20 +61,6 @@
 
 
 
-/*
- * When glGenRender/FramebuffersEXT() is called we insert pointers to
- * these placeholder objects into the hash table.
- * Later, when the object ID is first bound, we replace the placeholder
- * with the real frame/renderbuffer.
- */
-static struct gl_framebuffer DummyFramebuffer;
-static struct gl_renderbuffer DummyRenderbuffer;
-
-/* We bind this framebuffer when applications pass a NULL
- * drawable/surface in make current. */
-static struct gl_framebuffer IncompleteFramebuffer;
-
-
 static void
 delete_dummy_renderbuffer(struct gl_context *ctx, struct gl_renderbuffer *rb)
 {
@@ -87,16 +74,28 @@ delete_dummy_framebuffer(struct gl_framebuffer *fb)
 }
 
 
-void
-_mesa_init_fbobjects(struct gl_context *ctx)
-{
-   simple_mtx_init(&DummyFramebuffer.Mutex, mtx_plain);
-   simple_mtx_init(&DummyRenderbuffer.Mutex, mtx_plain);
-   simple_mtx_init(&IncompleteFramebuffer.Mutex, mtx_plain);
-   DummyFramebuffer.Delete = delete_dummy_framebuffer;
-   DummyRenderbuffer.Delete = delete_dummy_renderbuffer;
-   IncompleteFramebuffer.Delete = delete_dummy_framebuffer;
-}
+/*
+ * When glGenRender/FramebuffersEXT() is called we insert pointers to
+ * these placeholder objects into the hash table.
+ * Later, when the object ID is first bound, we replace the placeholder
+ * with the real frame/renderbuffer.
+ */
+static struct gl_framebuffer DummyFramebuffer = {
+   .Mutex = _SIMPLE_MTX_INITIALIZER_NP,
+   .Delete = delete_dummy_framebuffer,
+};
+static struct gl_renderbuffer DummyRenderbuffer = {
+   .Mutex = _SIMPLE_MTX_INITIALIZER_NP,
+   .Delete = delete_dummy_renderbuffer,
+};
+
+/* We bind this framebuffer when applications pass a NULL
+ * drawable/surface in make current. */
+static struct gl_framebuffer IncompleteFramebuffer = {
+   .Mutex = _SIMPLE_MTX_INITIALIZER_NP,
+   .Delete = delete_dummy_framebuffer,
+};
+
 
 struct gl_framebuffer *
 _mesa_get_incomplete_framebuffer(void)
@@ -301,7 +300,7 @@ get_attachment(struct gl_context *ctx, struct gl_framebuffer *fb,
    case GL_DEPTH_STENCIL_ATTACHMENT:
       if (!_mesa_is_desktop_gl(ctx) && !_mesa_is_gles3(ctx))
          return NULL;
-      /* fall-through */
+      FALLTHROUGH;
    case GL_DEPTH_ATTACHMENT_EXT:
       return &fb->Attachment[BUFFER_DEPTH];
    case GL_STENCIL_ATTACHMENT_EXT:
@@ -375,9 +374,6 @@ get_fb0_attachment(struct gl_context *ctx, struct gl_framebuffer *fb,
          return &fb->Attachment[BUFFER_BACK_LEFT];
       return NULL;
    case GL_AUX0:
-      if (fb->Visual.numAuxBuffers == 1) {
-         return &fb->Attachment[BUFFER_AUX0];
-      }
       return NULL;
 
    /* Page 336 (page 352 of the PDF) of the OpenGL 3.0 spec says:
@@ -718,6 +714,8 @@ fbo_incomplete(struct gl_context *ctx, const char *msg, int index)
    if (MESA_DEBUG_FLAGS & DEBUG_INCOMPLETE_FBO) {
       _mesa_debug(NULL, "FBO Incomplete: %s [%d]\n", msg, index);
    }
+
+   _mesa_update_valid_to_render_state(ctx);
 }
 
 
@@ -799,11 +797,12 @@ is_format_color_renderable(const struct gl_context *ctx, mesa_format format,
              (_mesa_has_EXT_color_buffer_half_float(ctx) &&
               _mesa_has_EXT_texture_rg(ctx));
    case GL_RGBA16F:
+      return _mesa_is_gles3(ctx) ||
+             _mesa_has_EXT_color_buffer_half_float(ctx);
    case GL_RGBA32F:
       return _mesa_has_EXT_color_buffer_float(ctx);
    case GL_RGB16F:
-      return _mesa_has_EXT_color_buffer_half_float(ctx) &&
-              _mesa_has_OES_texture_half_float(ctx);
+      return _mesa_has_EXT_color_buffer_half_float(ctx);
    case GL_RGB32F:
    case GL_RGB32I:
    case GL_RGB32UI:
@@ -816,6 +815,7 @@ is_format_color_renderable(const struct gl_context *ctx, mesa_format format,
    case GL_RGB10:
    case GL_RGB9_E5:
    case GL_SR8_EXT:
+   case GL_SRG8_EXT:
       return GL_FALSE;
    default:
       break;
@@ -918,6 +918,21 @@ test_attachment_completeness(const struct gl_context *ctx, GLenum format,
          att->Complete = GL_FALSE;
          return;
       }
+
+      /* Mutable non base level texture as framebuffer attachment
+       * must be mipmap complete.
+       */
+      if (texImage->Level > texObj->Attrib.BaseLevel &&
+          !texObj->_MipmapComplete) {
+         /* Test if texture has become mipmap complete meanwhile. */
+         _mesa_test_texobj_completeness(ctx, att->Texture);
+         if (!texObj->_MipmapComplete) {
+            att_incomplete("texture attachment not mipmap complete");
+            att->Complete = GL_FALSE;
+            return;
+         }
+      }
+
       if (texImage->Width < 1 || texImage->Height < 1) {
          att_incomplete("teximage width/height=0");
          att->Complete = GL_FALSE;
@@ -1094,7 +1109,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
    assert(_mesa_is_user_fbo(fb));
 
    /* we're changing framebuffer fields here */
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    numImages = 0;
    fb->Width = 0;
@@ -1208,9 +1223,9 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
       }
       else if (att->Type == GL_RENDERBUFFER_EXT) {
          minWidth = MIN2(minWidth, att->Renderbuffer->Width);
-         maxWidth = MAX2(minWidth, att->Renderbuffer->Width);
+         maxWidth = MAX2(maxWidth, att->Renderbuffer->Width);
          minHeight = MIN2(minHeight, att->Renderbuffer->Height);
-         maxHeight = MAX2(minHeight, att->Renderbuffer->Height);
+         maxHeight = MAX2(maxHeight, att->Renderbuffer->Height);
          f = att->Renderbuffer->InternalFormat;
          baseFormat = att->Renderbuffer->_BaseFormat;
          attFormat = att->Renderbuffer->Format;
@@ -1287,7 +1302,8 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
          }
       }
       else {
-         if (!ctx->Extensions.ARB_framebuffer_object) {
+         if (!_mesa_has_ARB_framebuffer_object(ctx) &&
+             !_mesa_is_gles3(ctx)) {
             /* check that width, height, format are same */
             if (minWidth != maxWidth || minHeight != maxHeight) {
                fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS_EXT;
@@ -1295,7 +1311,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
                return;
             }
             /* check that all color buffers are the same format */
-            if (intFormat != GL_NONE && f != intFormat) {
+            if (ctx->API != API_OPENGLES2 && intFormat != GL_NONE && f != intFormat) {
                fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_FORMATS_EXT;
                fbo_incomplete(ctx, "format mismatch", -1);
                return;
@@ -1314,9 +1330,15 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
 
       /* Check that layered rendering is consistent. */
       if (att->Layered) {
-         if (att_tex_target == GL_TEXTURE_CUBE_MAP)
+         if (att_tex_target == GL_TEXTURE_CUBE_MAP) {
+            /* Each layer's format and size must match to the base layer. */
+            if (!_mesa_cube_complete(att->Texture)) {
+               fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+               fbo_incomplete(ctx, "attachment not cube complete", i);
+               return;
+            }
             att_layer_count = 6;
-         else if (att_tex_target == GL_TEXTURE_1D_ARRAY)
+         } else if (att_tex_target == GL_TEXTURE_1D_ARRAY)
             att_layer_count = att->Renderbuffer->Height;
          else
             att_layer_count = att->Renderbuffer->Depth;
@@ -1986,7 +2008,7 @@ _mesa_DeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers)
       return;
    }
 
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    for (i = 0; i < n; i++) {
       if (renderbuffers[i] > 0) {
@@ -2299,6 +2321,13 @@ _mesa_base_fbo_format(const struct gl_context *ctx, GLenum internalFormat)
          ? GL_INTENSITY : 0;
 
    case GL_R16F:
+      return ((_mesa_is_desktop_gl(ctx) &&
+               ctx->Extensions.ARB_texture_rg &&
+               ctx->Extensions.ARB_texture_float) ||
+              _mesa_is_gles3(ctx) /* EXT_color_buffer_float */ ||
+              (_mesa_has_EXT_color_buffer_half_float(ctx) &&
+               _mesa_has_EXT_texture_rg(ctx)))
+         ? GL_RED : 0;
    case GL_R32F:
       return ((_mesa_is_desktop_gl(ctx) &&
                ctx->Extensions.ARB_texture_rg &&
@@ -2306,6 +2335,13 @@ _mesa_base_fbo_format(const struct gl_context *ctx, GLenum internalFormat)
               _mesa_is_gles3(ctx) /* EXT_color_buffer_float */ )
          ? GL_RED : 0;
    case GL_RG16F:
+      return ((_mesa_is_desktop_gl(ctx) &&
+               ctx->Extensions.ARB_texture_rg &&
+               ctx->Extensions.ARB_texture_float) ||
+              _mesa_is_gles3(ctx) /* EXT_color_buffer_float */ ||
+              (_mesa_has_EXT_color_buffer_half_float(ctx) &&
+               _mesa_has_EXT_texture_rg(ctx)))
+         ? GL_RG : 0;
    case GL_RG32F:
       return ((_mesa_is_desktop_gl(ctx) &&
                ctx->Extensions.ARB_texture_rg &&
@@ -2313,13 +2349,17 @@ _mesa_base_fbo_format(const struct gl_context *ctx, GLenum internalFormat)
               _mesa_is_gles3(ctx) /* EXT_color_buffer_float */ )
          ? GL_RG : 0;
    case GL_RGB16F:
-      return (_mesa_is_desktop_gl(ctx) && ctx->Extensions.ARB_texture_float) ||
-             (_mesa_is_gles(ctx) && _mesa_has_EXT_color_buffer_half_float(ctx))
+      return (_mesa_has_ARB_texture_float(ctx) ||
+              _mesa_has_EXT_color_buffer_half_float(ctx))
          ? GL_RGB : 0;
    case GL_RGB32F:
       return (_mesa_is_desktop_gl(ctx) && ctx->Extensions.ARB_texture_float)
          ? GL_RGB : 0;
    case GL_RGBA16F:
+      return (_mesa_has_ARB_texture_float(ctx) ||
+              _mesa_is_gles3(ctx) ||
+              _mesa_has_EXT_color_buffer_half_float(ctx))
+         ? GL_RGBA : 0;
    case GL_RGBA32F:
       return ((_mesa_is_desktop_gl(ctx) &&
                ctx->Extensions.ARB_texture_float) ||
@@ -2494,7 +2534,7 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
                                       storageSamples) == GL_NO_ERROR);
    }
 
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    if (rb->InternalFormat == internalFormat &&
        rb->Width == (GLuint) width &&
@@ -2708,7 +2748,7 @@ _mesa_EGLImageTargetRenderbufferStorageOES(GLenum target, GLeglImageOES image)
       return;
    }
 
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    ctx->Driver.EGLImageTargetRenderbufferStorage(ctx, rb, image);
 }
@@ -3120,16 +3160,13 @@ _mesa_bind_framebuffers(struct gl_context *ctx,
     * that a render-to-texture case.
     */
    if (bindReadBuf) {
-      FLUSH_VERTICES(ctx, _NEW_BUFFERS);
-
-      /* check if old readbuffer was render-to-texture */
-      check_end_texture_render(ctx, oldReadFb);
+      FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
       _mesa_reference_framebuffer(&ctx->ReadBuffer, newReadFb);
    }
 
    if (bindDrawBuf) {
-      FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+      FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
       ctx->NewDriverState |= ctx->DriverFlags.NewSampleLocations;
 
       /* check if old framebuffer had any texture attachments */
@@ -3141,6 +3178,7 @@ _mesa_bind_framebuffers(struct gl_context *ctx,
 
       _mesa_reference_framebuffer(&ctx->DrawBuffer, newDrawFb);
       _mesa_update_allow_draw_out_of_order(ctx);
+      _mesa_update_valid_to_render_state(ctx);
    }
 
    if ((bindDrawBuf || bindReadBuf) && ctx->Driver.BindFramebuffer) {
@@ -3181,7 +3219,7 @@ _mesa_DeleteFramebuffers(GLsizei n, const GLuint *framebuffers)
       return;
    }
 
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    for (i = 0; i < n; i++) {
       if (framebuffers[i] > 0) {
@@ -3714,7 +3752,7 @@ check_level(struct gl_context *ctx, struct gl_texture_object *texObj,
     *     greater than or equal to zero and smaller than the value of
     *     TEXTURE_VIEW_NUM_LEVELS for texture."
     */
-   const int max_levels = texObj->Immutable ? texObj->ImmutableLevels :
+   const int max_levels = texObj->Immutable ? texObj->Attrib.ImmutableLevels :
                           _mesa_max_texture_levels(ctx, target);
 
    if (level < 0 || level >= max_levels) {
@@ -3768,7 +3806,7 @@ _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
                           GLint level, GLsizei samples,
                           GLuint layer, GLboolean layered)
 {
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    simple_mtx_lock(&fb->Mutex);
    if (texObj) {
@@ -4176,7 +4214,7 @@ _mesa_framebuffer_renderbuffer(struct gl_context *ctx,
 {
    assert(!_mesa_is_winsys_fbo(fb));
 
-   FLUSH_VERTICES(ctx, _NEW_BUFFERS);
+   FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
    assert(ctx->Driver.FramebufferRenderbuffer);
    ctx->Driver.FramebufferRenderbuffer(ctx, fb, attachment, rb);
@@ -5059,7 +5097,7 @@ invalidate_framebuffer_storage(struct gl_context *ctx,
              */
             if (_mesa_is_desktop_gl(ctx) || _mesa_is_gles3(ctx))
                break;
-            /* fallthrough */
+            FALLTHROUGH;
          case GL_COLOR_ATTACHMENT0:
          case GL_COLOR_ATTACHMENT1:
          case GL_COLOR_ATTACHMENT2:

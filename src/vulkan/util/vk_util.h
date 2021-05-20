@@ -23,6 +23,11 @@
 #ifndef VK_UTIL_H
 #define VK_UTIL_H
 
+#include "util/bitscan.h"
+#include "util/macros.h"
+#include "compiler/shader_enums.h"
+#include <string.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -231,6 +236,24 @@ struct vk_pipeline_cache_header {
    ((__enum) >= VK_EXT_OFFSET ? ((((__enum) - VK_EXT_OFFSET) / 1000UL) + 1) : 0)
 #define VK_ENUM_OFFSET(__enum) \
    ((__enum) >= VK_EXT_OFFSET ? ((__enum) % 1000) : (__enum))
+
+#define typed_memcpy(dest, src, count) do { \
+   STATIC_ASSERT(sizeof(*(src)) == sizeof(*(dest))); \
+   memcpy((dest), (src), (count) * sizeof(*(src))); \
+} while (0)
+
+static inline gl_shader_stage
+vk_to_mesa_shader_stage(VkShaderStageFlagBits vk_stage)
+{
+   assert(util_bitcount((uint32_t) vk_stage) == 1);
+   return (gl_shader_stage) (ffs((uint32_t) vk_stage) - 1);
+}
+
+static inline VkShaderStageFlagBits
+mesa_to_vk_shader_stage(gl_shader_stage mesa_stage)
+{
+   return (VkShaderStageFlagBits) (1 << ((uint32_t) mesa_stage));
+}
 
 #ifdef __cplusplus
 }

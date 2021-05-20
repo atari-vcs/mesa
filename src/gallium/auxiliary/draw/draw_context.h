@@ -69,7 +69,7 @@ bool draw_has_llvm(void);
 
 struct draw_context *draw_create( struct pipe_context *pipe );
 
-#ifdef LLVM_AVAILABLE
+#ifdef DRAW_LLVM_AVAILABLE
 struct draw_context *draw_create_with_llvm_context(struct pipe_context *pipe,
                                                    void *context);
 #endif
@@ -284,6 +284,7 @@ void draw_set_tess_state(struct draw_context *draw,
 
 void draw_set_vertex_buffers(struct draw_context *draw,
                              unsigned start_slot, unsigned count,
+                             unsigned unbind_num_trailing_slots,
                              const struct pipe_vertex_buffer *buffers);
 
 void draw_set_vertex_elements(struct draw_context *draw,
@@ -323,7 +324,10 @@ draw_set_mapped_so_targets(struct draw_context *draw,
  */
 
 void draw_vbo(struct draw_context *draw,
-              const struct pipe_draw_info *info);
+              const struct pipe_draw_info *info,
+              const struct pipe_draw_indirect_info *indirect,
+              const struct pipe_draw_start_count *draws,
+              unsigned num_draws);
 
 
 /*******************************************************************************

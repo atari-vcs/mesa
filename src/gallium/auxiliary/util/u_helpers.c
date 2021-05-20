@@ -45,7 +45,9 @@
 void util_set_vertex_buffers_mask(struct pipe_vertex_buffer *dst,
                                   uint32_t *enabled_buffers,
                                   const struct pipe_vertex_buffer *src,
-                                  unsigned start_slot, unsigned count)
+                                  unsigned start_slot, unsigned count,
+                                  unsigned unbind_num_trailing_slots,
+                                  bool take_ownership)
 {
    unsigned i;
    uint32_t bitmask = 0;
@@ -61,7 +63,7 @@ void util_set_vertex_buffers_mask(struct pipe_vertex_buffer *dst,
 
          pipe_vertex_buffer_unreference(&dst[i]);
 
-         if (!src[i].is_user_buffer)
+         if (!take_ownership && !src[i].is_user_buffer)
             pipe_resource_reference(&dst[i].buffer.resource, src[i].buffer.resource);
       }
 
@@ -75,6 +77,9 @@ void util_set_vertex_buffers_mask(struct pipe_vertex_buffer *dst,
       for (i = 0; i < count; i++)
          pipe_vertex_buffer_unreference(&dst[i]);
    }
+
+   for (i = 0; i < unbind_num_trailing_slots; i++)
+      pipe_vertex_buffer_unreference(&dst[count + i]);
 }
 
 /**
@@ -84,7 +89,9 @@ void util_set_vertex_buffers_mask(struct pipe_vertex_buffer *dst,
 void util_set_vertex_buffers_count(struct pipe_vertex_buffer *dst,
                                    unsigned *dst_count,
                                    const struct pipe_vertex_buffer *src,
-                                   unsigned start_slot, unsigned count)
+                                   unsigned start_slot, unsigned count,
+                                   unsigned unbind_num_trailing_slots,
+                                   bool take_ownership)
 {
    unsigned i;
    uint32_t enabled_buffers = 0;
@@ -95,7 +102,8 @@ void util_set_vertex_buffers_count(struct pipe_vertex_buffer *dst,
    }
 
    util_set_vertex_buffers_mask(dst, &enabled_buffers, src, start_slot,
-                                count);
+                                count, unbind_num_trailing_slots,
+                                take_ownership);
 
    *dst_count = util_last_bit(enabled_buffers);
 }
@@ -143,13 +151,14 @@ void util_set_shader_buffers_mask(struct pipe_shader_buffer *dst,
 bool
 util_upload_index_buffer(struct pipe_context *pipe,
                          const struct pipe_draw_info *info,
+                         const struct pipe_draw_start_count *draw,
                          struct pipe_resource **out_buffer,
                          unsigned *out_offset, unsigned alignment)
 {
-   unsigned start_offset = info->start * info->index_size;
+   unsigned start_offset = draw->start * info->index_size;
 
    u_upload_data(pipe->stream_uploader, start_offset,
-                 info->count * info->index_size, alignment,
+                 draw->count * info->index_size, alignment,
                  (char*)info->index.user + start_offset,
                  out_offset, out_buffer);
    u_upload_unmap(pipe->stream_uploader);

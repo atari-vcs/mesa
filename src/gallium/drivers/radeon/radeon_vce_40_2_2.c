@@ -48,11 +48,11 @@ static void task_info(struct rvce_encoder *enc, uint32_t op, uint32_t dep, uint3
    RVCE_BEGIN(0x00000002); // task info
    if (op == 0x3) {
       if (enc->task_info_idx) {
-         uint32_t offs = enc->cs->current.cdw - enc->task_info_idx + 3;
+         uint32_t offs = enc->cs.current.cdw - enc->task_info_idx + 3;
          // Update offsetOfNextTaskInfo
-         enc->cs->current.buf[enc->task_info_idx] = offs;
+         enc->cs.current.buf[enc->task_info_idx] = offs;
       }
-      enc->task_info_idx = enc->cs->current.cdw;
+      enc->task_info_idx = enc->cs.current.cdw;
    }
    RVCE_CS(0xffffffff); // offsetOfNextTaskInfo
    RVCE_CS(op);         // taskOperation
@@ -308,16 +308,16 @@ static void encode(struct rvce_encoder *enc)
    RVCE_CS(0x00000000);    // endOfSequence
    RVCE_CS(0x00000000);    // endOfStream
    RVCE_READ(enc->handle, RADEON_DOMAIN_VRAM,
-             enc->luma->u.legacy.level[0].offset); // inputPictureLumaAddressHi/Lo
+             (uint64_t)enc->luma->u.legacy.level[0].offset_256B * 256); // inputPictureLumaAddressHi/Lo
    RVCE_READ(enc->handle, RADEON_DOMAIN_VRAM,
-             enc->chroma->u.legacy.level[0].offset);              // inputPictureChromaAddressHi/Lo
+             (uint64_t)enc->chroma->u.legacy.level[0].offset_256B * 256);              // inputPictureChromaAddressHi/Lo
    RVCE_CS(align(enc->luma->u.legacy.level[0].nblk_y, 16));       // encInputFrameYPitch
    RVCE_CS(enc->luma->u.legacy.level[0].nblk_x * enc->luma->bpe); // encInputPicLumaPitch
    RVCE_CS(enc->chroma->u.legacy.level[0].nblk_x * enc->chroma->bpe); // encInputPicChromaPitch
    RVCE_CS(0x00000000);                                               // encInputPic(Addr|Array)Mode
    RVCE_CS(0x00000000);                                               // encInputPicTileConfig
    RVCE_CS(enc->pic.picture_type);                                    // encPicType
-   RVCE_CS(enc->pic.picture_type == PIPE_H264_ENC_PICTURE_TYPE_IDR);  // encIdrFlag
+   RVCE_CS(enc->pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR); // encIdrFlag
    RVCE_CS(0x00000000);                                               // encIdrPicId
    RVCE_CS(0x00000000);                                               // encMGSKeyPic
    RVCE_CS(!enc->pic.not_referenced);                                 // encReferenceFlag
@@ -327,7 +327,7 @@ static void encode(struct rvce_encoder *enc)
    RVCE_CS(0x00000000); // num_ref_idx_l1_active_minus1
 
    i = enc->pic.frame_num - enc->pic.ref_idx_l0;
-   if (i > 1 && enc->pic.picture_type == PIPE_H264_ENC_PICTURE_TYPE_P) {
+   if (i > 1 && enc->pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_P) {
       RVCE_CS(0x00000001); // encRefListModificationOp
       RVCE_CS(i - 1);      // encRefListModificationNum
    } else {
@@ -349,8 +349,8 @@ static void encode(struct rvce_encoder *enc)
 
    // encReferencePictureL0[0]
    RVCE_CS(0x00000000); // pictureStructure
-   if (enc->pic.picture_type == PIPE_H264_ENC_PICTURE_TYPE_P ||
-       enc->pic.picture_type == PIPE_H264_ENC_PICTURE_TYPE_B) {
+   if (enc->pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_P ||
+       enc->pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_B) {
       struct rvce_cpb_slot *l0 = si_l0_slot(enc);
       si_vce_frame_offset(enc, l0, &luma_offset, &chroma_offset);
       RVCE_CS(l0->picture_type);  // encPicType
@@ -376,7 +376,7 @@ static void encode(struct rvce_encoder *enc)
 
    // encReferencePictureL1[0]
    RVCE_CS(0x00000000); // pictureStructure
-   if (enc->pic.picture_type == PIPE_H264_ENC_PICTURE_TYPE_B) {
+   if (enc->pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_B) {
       struct rvce_cpb_slot *l1 = si_l1_slot(enc);
       si_vce_frame_offset(enc, l1, &luma_offset, &chroma_offset);
       RVCE_CS(l1->picture_type);  // encPicType

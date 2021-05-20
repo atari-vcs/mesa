@@ -27,7 +27,6 @@
 #define __PAN_DECODE_H__
 
 #include "wrap.h"
-#include "util/list.h"
 
 extern FILE *pandecode_dump_stream;
 
@@ -56,7 +55,7 @@ __pandecode_fetch_gpu_mem(const struct pandecode_mapped_memory *mem,
                 mem = pandecode_find_mapped_gpu_mem_containing(gpu_va);
 
         if (!mem) {
-                fprintf(stderr, "Access to unknown memory %" PRIx64 " in %s:%d",
+                fprintf(stderr, "Access to unknown memory %" PRIx64 " in %s:%d\n",
                         gpu_va, filename, line);
                 assert(0);
         }

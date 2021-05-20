@@ -36,9 +36,7 @@ void nir_inline_function_impl(struct nir_builder *b,
    /* Insert a nop at the cursor so we can keep track of where things are as
     * we add/remove stuff from the CFG.
     */
-   nir_intrinsic_instr *nop =
-      nir_intrinsic_instr_create(b->shader, nir_intrinsic_nop);
-   nir_builder_instr_insert(b, &nop->instr);
+   nir_intrinsic_instr *nop = nir_nop(b);
 
    exec_list_append(&b->impl->locals, &copy->locals);
    exec_list_append(&b->impl->registers, &copy->registers);
@@ -86,7 +84,7 @@ void nir_inline_function_impl(struct nir_builder *b,
             assert(param_idx < impl->function->num_params);
             assert(load->dest.is_ssa);
             nir_ssa_def_rewrite_uses(&load->dest.ssa,
-                                     nir_src_for_ssa(params[param_idx]));
+                                     params[param_idx]);
 
             /* Remove any left-over load_param intrinsics because they're soon
              * to be in another function and therefore no longer valid.

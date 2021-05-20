@@ -41,7 +41,7 @@ def insert_code(code):
     insert_queue.append(CodeCheck(code))
 
 def insert_pattern(pattern):
-    insert_queue.append(PatternCheck(pattern))
+    insert_queue.append(PatternCheck(pattern, False, '(code pattern)'))
 
 def vector_gpr(prefix, name, size, align):
     insert_code(f'{name} = {name}0')
@@ -63,6 +63,13 @@ funcs.update({
 })
 for i in range(2, 14):
     funcs['v%d' % (i * 32)] = lambda name: vector_gpr('v', name, i, 1)
+
+def _match_func(names):
+    for name in names.split(' '):
+        insert_code(f'funcs["{name}"] = lambda _: {name}')
+    return ' '.join(f'${name}' for name in names.split(' '))
+
+funcs['match_func'] = _match_func
 '''
 
 class Check:

@@ -1292,7 +1292,7 @@ Converter::parseNIR()
       info->prop.cp.numThreads[0] = nir->info.cs.local_size[0];
       info->prop.cp.numThreads[1] = nir->info.cs.local_size[1];
       info->prop.cp.numThreads[2] = nir->info.cs.local_size[2];
-      info_out->bin.smemSize += nir->info.cs.shared_size;
+      info_out->bin.smemSize += nir->info.shared_size;
       break;
    case Program::TYPE_FRAGMENT:
       info_out->prop.fp.earlyFragTests = nir->info.fs.early_fragment_tests;
@@ -1807,7 +1807,10 @@ Converter::visit(nir_intrinsic_instr *insn)
          mode = NV50_IR_INTERP_DEFAULT;
       } else if (op == nir_intrinsic_load_barycentric_at_sample) {
          info_out->prop.fp.readsSampleLocations = true;
-         mkOp1(OP_PIXLD, TYPE_U32, newDefs[0], getSrc(&insn->src[0], 0))->subOp = NV50_IR_SUBOP_PIXLD_OFFSET;
+         Value *sample = getSSA();
+         mkOp3(OP_SELP, TYPE_U32, sample, mkImm(0), getSrc(&insn->src[0], 0), mkImm(0))
+            ->subOp = 2;
+         mkOp1(OP_PIXLD, TYPE_U32, newDefs[0], sample)->subOp = NV50_IR_SUBOP_PIXLD_OFFSET;
          mode = NV50_IR_INTERP_OFFSET;
       } else {
          unreachable("all intrinsics already handled above");
@@ -3136,7 +3139,11 @@ Converter::run()
    /*TODO: improve this lowering/optimisation loop so that we can use
     *      nir_opt_idiv_const effectively before this.
     */
-   NIR_PASS(progress, nir, nir_lower_idiv, nir_lower_idiv_precise);
+   nir_lower_idiv_options idiv_options = {
+      .imprecise_32bit_lowering = false,
+      .allow_fp16 = true,
+   };
+   NIR_PASS(progress, nir, nir_lower_idiv, &idiv_options);
 
    do {
       progress = false;
@@ -3230,8 +3237,8 @@ nvir_nir_shader_compiler_options(int chipset)
    op.lower_uadd_carry = true; // TODO
    op.lower_usub_borrow = true; // TODO
    op.lower_mul_high = false;
-   op.lower_negate = false;
-   op.lower_sub = true;
+   op.lower_fneg = false;
+   op.lower_ineg = false;
    op.lower_scmp = true; // TODO: not implemented yet
    op.lower_vector_cmp = false;
    op.lower_bitops = false;

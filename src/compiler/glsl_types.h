@@ -36,7 +36,7 @@
 #include "util/macros.h"
 
 #ifdef __cplusplus
-#include "main/config.h"
+#include "mesa/main/config.h"
 #endif
 
 struct glsl_type;
@@ -288,7 +288,7 @@ enum {
 
 #include "GL/gl.h"
 #include "util/ralloc.h"
-#include "main/menums.h" /* for gl_texture_index, C++'s enum rules are broken */
+#include "mesa/main/menums.h" /* for gl_texture_index, C++'s enum rules are broken */
 
 struct glsl_type {
    GLenum gl_type;
@@ -521,6 +521,8 @@ public:
     */
    unsigned component_slots() const;
 
+   unsigned component_slots_aligned(unsigned offset) const;
+
    /**
     * Calculate offset between the base location of the struct in
     * uniform storage and a struct member.
@@ -638,7 +640,7 @@ public:
     *    possible following the alignment required by the size/align func.
     *
     *  - All composite types (structures, matrices, and arrays) have an
-    *    alignment equal to the highest alighment of any member of the composite.
+    *    alignment equal to the highest alignment of any member of the composite.
     *
     * The types returned by this function are likely not suitable for most UBO
     * or SSBO layout because they do not add the extra array and substructure
@@ -794,7 +796,7 @@ public:
     */
    bool is_integer_16_32() const
    {
-      return is_integer_16() || is_integer_32() || is_integer_64();
+      return is_integer_16() || is_integer_32();
    }
 
    /**
@@ -1057,11 +1059,11 @@ public:
          return 0;
 
       unsigned size = length;
-      const glsl_type *base_type = fields.array;
+      const glsl_type *array_base_type = fields.array;
 
-      while (base_type->is_array()) {
-         size = size * base_type->length;
-         base_type = base_type->fields.array;
+      while (array_base_type->is_array()) {
+         size = size * array_base_type->length;
+         array_base_type = array_base_type->fields.array;
       }
       return size;
    }

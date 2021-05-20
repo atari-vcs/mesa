@@ -276,6 +276,8 @@ LoadPropagation::visit(BasicBlock *bb)
 
          if (!ld || ld->fixed || (ld->op != OP_LOAD && ld->op != OP_MOV))
             continue;
+         if (ld->op == OP_LOAD && ld->subOp == NV50_IR_SUBOP_LOAD_LOCKED)
+            continue;
          if (!targ->insnCanLoad(i, s, ld))
             continue;
 
@@ -1108,6 +1110,7 @@ ConstantFolding::opnd(Instruction *i, ImmediateValue &imm0, int s)
          }
       } else
       if (imm0.isInteger(0)) {
+         i->dnz = 0;
          i->op = OP_MOV;
          i->setSrc(0, new_ImmediateValue(prog, 0u));
          i->src(0).mod = Modifier(0);
@@ -1117,6 +1120,7 @@ ConstantFolding::opnd(Instruction *i, ImmediateValue &imm0, int s)
       if (!i->postFactor && (imm0.isInteger(1) || imm0.isInteger(-1))) {
          if (imm0.isNegative())
             i->src(t).mod = i->src(t).mod ^ Modifier(NV50_IR_MOD_NEG);
+         i->dnz = 0;
          i->op = i->src(t).mod.getOp();
          if (s == 0) {
             i->setSrc(0, i->getSrc(1));
@@ -1157,6 +1161,7 @@ ConstantFolding::opnd(Instruction *i, ImmediateValue &imm0, int s)
          i->src(0).mod = i->src(2).mod;
          i->setSrc(1, NULL);
          i->setSrc(2, NULL);
+         i->dnz = 0;
          i->op = i->src(0).mod.getOp();
          if (i->op != OP_CVT)
             i->src(0).mod = 0;
@@ -2164,7 +2169,7 @@ AlgebraicOpt::handleCVT_EXTBF(Instruction *cvt)
    Instruction *insn = cvt->getSrc(0)->getInsn();
    ImmediateValue imm;
    Value *arg = NULL;
-   unsigned width, offset;
+   unsigned width, offset = 0;
    if ((cvt->sType != TYPE_U32 && cvt->sType != TYPE_S32) || !insn)
       return;
    if (insn->op == OP_EXTBF && insn->src(1).getImmediate(imm)) {
@@ -2196,7 +2201,7 @@ AlgebraicOpt::handleCVT_EXTBF(Instruction *cvt)
 
       arg = insn->getSrc(!s);
       Instruction *shift = arg->getInsn();
-      offset = 0;
+
       if (shift && shift->op == OP_SHR &&
           shift->sType == cvt->sType &&
           shift->src(1).getImmediate(imm) &&
@@ -3925,7 +3930,10 @@ DeadCodeElim::visit(BasicBlock *bb)
          if (i->op == OP_ATOM ||
              i->op == OP_SUREDP ||
              i->op == OP_SUREDB) {
-            i->setDef(0, NULL);
+            const Target *targ = prog->getTarget();
+            if (targ->getChipset() >= NVISA_GF100_CHIPSET ||
+                i->subOp != NV50_IR_SUBOP_ATOM_CAS)
+               i->setDef(0, NULL);
             if (i->op == OP_ATOM && i->subOp == NV50_IR_SUBOP_ATOM_EXCH) {
                i->cache = CACHE_CV;
                i->op = OP_STORE;

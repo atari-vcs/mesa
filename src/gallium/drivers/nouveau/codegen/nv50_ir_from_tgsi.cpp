@@ -1180,6 +1180,7 @@ void Source::scanProperty(const struct tgsi_full_property *prop)
    case TGSI_PROPERTY_FS_COORD_PIXEL_CENTER:
    case TGSI_PROPERTY_FS_DEPTH_LAYOUT:
    case TGSI_PROPERTY_GS_INPUT_PRIM:
+   case TGSI_PROPERTY_FS_BLEND_EQUATION_ADVANCED:
       // we don't care
       break;
    case TGSI_PROPERTY_VS_PROHIBIT_UCPS:
@@ -1691,7 +1692,7 @@ private:
 
    class BindArgumentsPass : public Pass {
    public:
-      BindArgumentsPass(Converter &conv) : conv(conv) { }
+      BindArgumentsPass(Converter &conv) : conv(conv), sub(NULL) { }
 
    private:
       Converter &conv;
@@ -3046,11 +3047,19 @@ Converter::handleINTERP(Value *dst[4])
    case TGSI_OPCODE_INTERP_CENTROID:
       mode |= NV50_IR_INTERP_CENTROID;
       break;
-   case TGSI_OPCODE_INTERP_SAMPLE:
-      insn = mkOp1(OP_PIXLD, TYPE_U32, (offset = getScratch()), fetchSrc(1, 0));
+   case TGSI_OPCODE_INTERP_SAMPLE: {
+      // When using a non-MS buffer, we're supposed to always use the center
+      // (i.e. sample 0). This adds a SELP which will be always true or false
+      // based on a data fixup.
+      Value *sample = getScratch();
+      mkOp3(OP_SELP, TYPE_U32, sample, mkImm(0), fetchSrc(1, 0), mkImm(0))
+         ->subOp = 2;
+
+      insn = mkOp1(OP_PIXLD, TYPE_U32, (offset = getScratch()), sample);
       insn->subOp = NV50_IR_SUBOP_PIXLD_OFFSET;
       mode |= NV50_IR_INTERP_OFFSET;
       break;
+   }
    case TGSI_OPCODE_INTERP_OFFSET: {
       // The input in src1.xy is float, but we need a single 32-bit value
       // where the upper and lower 16 bits are encoded in S0.12 format. We need
@@ -3112,7 +3121,7 @@ Converter::handleInstruction(const struct tgsi_full_instruction *insn)
 
    Value *dst0[4], *rDst0[4];
    Value *src0, *src1, *src2, *src3;
-   Value *val0, *val1;
+   Value *val0 = NULL, *val1 = NULL;
    int c;
 
    tgsi = tgsi::Instruction(insn);
@@ -3406,6 +3415,8 @@ Converter::handleInstruction(const struct tgsi_full_instruction *insn)
    case TGSI_OPCODE_READ_INVOC:
       if (tgsi.getOpcode() == TGSI_OPCODE_READ_INVOC)
          src1 = fetchSrc(1, 0);
+      else
+         src1 = val0;
       FOR_EACH_DST_ENABLED_CHANNEL(0, c, tgsi) {
          geni = mkOp3(op, dstTy, dst0[c], fetchSrc(0, c), src1, mkImm(0x1f));
          geni->subOp = NV50_IR_SUBOP_SHFL_IDX;

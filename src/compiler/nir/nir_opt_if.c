@@ -541,7 +541,7 @@ opt_split_alu_of_phi(nir_builder *b, nir_loop *loop)
        * result of the phi.
        */
       nir_ssa_def_rewrite_uses(&alu->dest.dest.ssa,
-                               nir_src_for_ssa(&phi->dest.ssa));
+                               &phi->dest.ssa);
 
       /* Since the original ALU instruction no longer has any readers, just
        * remove it.
@@ -553,21 +553,6 @@ opt_split_alu_of_phi(nir_builder *b, nir_loop *loop)
    }
 
    return progress;
-}
-
-/**
- * Get the SSA value from a phi node that corresponds to a specific block
- */
-static nir_ssa_def *
-ssa_for_phi_from_block(nir_phi_instr *phi, nir_block *block)
-{
-   nir_foreach_phi_src(src, phi) {
-      if (src->pred == block)
-         return src->src.ssa;
-   }
-
-   assert(!"Block is not a predecessor of phi.");
-   return NULL;
 }
 
 /**
@@ -705,15 +690,15 @@ opt_simplify_bcsel_of_phi(nir_builder *b, nir_loop *loop)
       phi_src = ralloc(phi, nir_phi_src);
       phi_src->pred = prev_block;
       phi_src->src =
-         nir_src_for_ssa(ssa_for_phi_from_block(nir_instr_as_phi(bcsel->src[entry_src].src.ssa->parent_instr),
-                                                prev_block));
+         nir_phi_get_src_from_block(nir_instr_as_phi(bcsel->src[entry_src].src.ssa->parent_instr),
+                                    prev_block)->src;
       exec_list_push_tail(&phi->srcs, &phi_src->node);
 
       phi_src = ralloc(phi, nir_phi_src);
       phi_src->pred = continue_block;
       phi_src->src =
-         nir_src_for_ssa(ssa_for_phi_from_block(nir_instr_as_phi(bcsel->src[continue_src].src.ssa->parent_instr),
-                                                continue_block));
+         nir_phi_get_src_from_block(nir_instr_as_phi(bcsel->src[continue_src].src.ssa->parent_instr),
+                                    continue_block)->src;
       exec_list_push_tail(&phi->srcs, &phi_src->node);
 
       nir_ssa_dest_init(&phi->instr,
@@ -729,7 +714,7 @@ opt_simplify_bcsel_of_phi(nir_builder *b, nir_loop *loop)
        * the phi.
        */
       nir_ssa_def_rewrite_uses(&bcsel->dest.dest.ssa,
-                               nir_src_for_ssa(&phi->dest.ssa));
+                               &phi->dest.ssa);
 
       /* Since the original bcsel instruction no longer has any readers,
        * just remove it.
@@ -803,7 +788,7 @@ nir_block_ends_in_continue(nir_block *block)
 static bool
 opt_if_loop_last_continue(nir_loop *loop, bool aggressive_last_continue)
 {
-   nir_if *nif;
+   nir_if *nif = NULL;
    bool then_ends_in_continue = false;
    bool else_ends_in_continue = false;
 
@@ -839,7 +824,7 @@ opt_if_loop_last_continue(nir_loop *loop, bool aggressive_last_continue)
    }
 
    /* If we didn't find an if to optimise return */
-   if (!then_ends_in_continue && !else_ends_in_continue)
+   if (!nif || (!then_ends_in_continue && !else_ends_in_continue))
       return false;
 
    /* If there is nothing after the if-statement we bail */

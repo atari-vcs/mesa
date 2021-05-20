@@ -446,6 +446,8 @@ v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
         const struct v3d_device_info *devinfo = &v3d->screen->devinfo;
 
         key->num_tex_used = texstate->num_textures;
+        key->num_samplers_used = texstate->num_textures;
+        assert(key->num_tex_used == key->num_samplers_used);
         for (int i = 0; i < texstate->num_textures; i++) {
                 struct pipe_sampler_view *sampler = texstate->textures[i];
                 struct v3d_sampler_view *v3d_sampler = v3d_sampler_view(sampler);
@@ -455,7 +457,7 @@ v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
                 if (!sampler)
                         continue;
 
-                key->tex[i].return_size =
+                key->sampler[i].return_size =
                         v3d_get_tex_return_size(devinfo,
                                                 sampler->format,
                                                 sampler_state->compare_mode);
@@ -464,17 +466,17 @@ v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
                  * channels (meaning no recompiles for most statechanges),
                  * while for 32 we actually scale the returns with channels.
                  */
-                if (key->tex[i].return_size == 16) {
-                        key->tex[i].return_channels = 2;
+                if (key->sampler[i].return_size == 16) {
+                        key->sampler[i].return_channels = 2;
                 } else if (devinfo->ver > 40) {
-                        key->tex[i].return_channels = 4;
+                        key->sampler[i].return_channels = 4;
                 } else {
-                        key->tex[i].return_channels =
+                        key->sampler[i].return_channels =
                                 v3d_get_tex_return_channels(devinfo,
                                                             sampler->format);
                 }
 
-                if (key->tex[i].return_size == 32 && devinfo->ver < 40) {
+                if (key->sampler[i].return_size == 32 && devinfo->ver < 40) {
                         memcpy(key->tex[i].swizzle,
                                v3d_sampler->swizzle,
                                sizeof(v3d_sampler->swizzle));
@@ -487,15 +489,6 @@ v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
                         key->tex[i].swizzle[2] = PIPE_SWIZZLE_Z;
                         key->tex[i].swizzle[3] = PIPE_SWIZZLE_W;
                 }
-
-                if (sampler) {
-                        key->tex[i].clamp_s =
-                                sampler_state->wrap_s == PIPE_TEX_WRAP_CLAMP;
-                        key->tex[i].clamp_t =
-                                sampler_state->wrap_t == PIPE_TEX_WRAP_CLAMP;
-                        key->tex[i].clamp_r =
-                                sampler_state->wrap_r == PIPE_TEX_WRAP_CLAMP;
-                }
         }
 }
 
@@ -505,10 +498,15 @@ v3d_setup_shared_precompile_key(struct v3d_uncompiled_shader *uncompiled,
 {
         nir_shader *s = uncompiled->base.ir.nir;
 
+        /* Note that below we access they key's texture and sampler fields
+         * using the same index. On OpenGL they are the same (they are
+         * combined)
+         */
         key->num_tex_used = s->info.num_textures;
+        key->num_samplers_used = s->info.num_textures;
         for (int i = 0; i < s->info.num_textures; i++) {
-                key->tex[i].return_size = 16;
-                key->tex[i].return_channels = 2;
+                key->sampler[i].return_size = 16;
+                key->sampler[i].return_channels = 2;
 
                 key->tex[i].swizzle[0] = PIPE_SWIZZLE_X;
                 key->tex[i].swizzle[1] = PIPE_SWIZZLE_Y;
@@ -545,7 +543,6 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                          prim_mode <= PIPE_PRIM_LINE_STRIP);
         key->line_smoothing = (key->is_lines &&
                                v3d_line_smoothing_enabled(v3d));
-        key->clamp_color = v3d->rasterizer->base.clamp_fragment_color;
         if (v3d->blend->base.logicop_enable) {
                 key->logicop_func = v3d->blend->base.logicop_func;
         } else {
@@ -557,11 +554,6 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                                         v3d->sample_mask != (1 << V3D_MAX_SAMPLES) - 1);
                 key->sample_alpha_to_coverage = v3d->blend->base.alpha_to_coverage;
                 key->sample_alpha_to_one = v3d->blend->base.alpha_to_one;
-        }
-
-        if (v3d->zsa->base.alpha.enabled) {
-                key->alpha_test = true;
-                key->alpha_test_func = v3d->zsa->base.alpha.func;
         }
 
         key->swap_color_rb = v3d->swap_color_rb;
@@ -611,9 +603,6 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                         (v3d->rasterizer->base.sprite_coord_mode ==
                          PIPE_SPRITE_COORD_UPPER_LEFT);
         }
-
-        key->light_twoside = v3d->rasterizer->base.light_twoside;
-        key->shade_model_flat = v3d->rasterizer->base.flatshade;
 
         struct v3d_compiled_shader *old_fs = v3d->prog.fs;
         v3d->prog.fs = v3d_get_compiled_shader(v3d, &key->base, sizeof(*key));
@@ -756,8 +745,6 @@ v3d_update_compiled_vs(struct v3d_context *v3d, uint8_t prim_mode)
                    sizeof(key->used_outputs));
         }
 
-        key->clamp_color = v3d->rasterizer->base.clamp_vertex_color;
-
         key->per_vertex_point_size =
                 (prim_mode == PIPE_PRIM_POINTS &&
                  v3d->rasterizer->base.point_size_per_vertex);
@@ -815,6 +802,12 @@ v3d_update_compiled_vs(struct v3d_context *v3d, uint8_t prim_mode)
                                0, tail_bytes);
                 }
                 key->num_used_outputs = shader_state->num_tf_outputs;
+        } else {
+                key->num_used_outputs = v3d->prog.gs_bin->prog_data.gs->num_inputs;
+                STATIC_ASSERT(sizeof(key->used_outputs) ==
+                              sizeof(v3d->prog.gs_bin->prog_data.gs->input_slots));
+                memcpy(key->used_outputs, v3d->prog.gs_bin->prog_data.gs->input_slots,
+                       sizeof(key->used_outputs));
         }
 
         struct v3d_compiled_shader *cs =

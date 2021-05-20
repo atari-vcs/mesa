@@ -1,3 +1,9 @@
+mesa (21.1.0.4-1apertis1vcs2) vcs; urgency=medium
+
+  * Build using llvm12.
+
+ -- Christopher Obbard <chris.obbard@collabora.com>  Thu, 20 May 2021 16:07:56 +0100
+
 mesa (21.1.0.4-1apertis1vcs1) vcs; urgency=medium
 
   * Sync updates from Debian Experimental.
